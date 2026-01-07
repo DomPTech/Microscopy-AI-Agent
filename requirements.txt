@@ -1,3 +1,4 @@
 streamlit
 rich
 pydantic
+smolagents[toolkit]
