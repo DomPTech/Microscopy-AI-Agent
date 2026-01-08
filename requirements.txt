@@ -2,3 +2,9 @@ streamlit
 rich
 pydantic
 smolagents[toolkit]
+transformers
+psutil
+onnxruntime
+bitsandbytes
+onnxruntime-tools
+accelerate
