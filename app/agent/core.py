@@ -14,7 +14,7 @@ class Agent:
             model_id = "Qwen/Qwen2.5-0.5B-Instruct"
             load_in_8bit = True if not torch.backends.mps.is_available() else False
         elif ram_gb > 70:
-            model_id = "Qwen/Qwen3-32B-Instruct"
+            model_id = "Qwen/Qwen2.5-32B-Instruct"
         else:
             model_id = "Qwen/Qwen2.5-1.5B-Instruct" 
 
