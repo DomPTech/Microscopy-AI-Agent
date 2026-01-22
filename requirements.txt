@@ -4,3 +4,6 @@ transformers
 accelerate
 psutil
 wikipedia-api
+twisted
+numpy
+Pyro5

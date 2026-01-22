@@ -1,28 +1,167 @@
+import subprocess
+import time
+import sys
+import os
+from typing import Optional
 from smolagents import tool
+import Pyro5.api
+import Pyro5.errors
+import numpy as np
+
+# Global state for the client and server process
+# PROXY is the Pyro5 proxy object
+PROXY: Optional[object] = None
+SERVER_PROCESS: Optional[subprocess.Popen] = None
 
 @tool
-def adjust_magnification(amount: float) -> dict:
+def start_server(mode: str = "mock", port: int = 9093) -> str:
+    """
+    Starts the microscope server (Smart Proxy).
+    
+    Args:
+        mode: "mock" for testing/simulation, "real" for actual hardware.
+        port: Port to run the server on (default 9093).
+    """
+    global SERVER_PROCESS
+    if SERVER_PROCESS and SERVER_PROCESS.poll() is None:
+        return "Server is already running."
+
+    if mode == "mock":
+        script_path = "app/services/smart_proxy/server_mock.py"
+    else:
+        script_path = "app/services/smart_proxy/server.py"
+        
+    abs_path = os.path.abspath(script_path)
+    if not os.path.exists(abs_path):
+        return f"Error: Server script not found at {abs_path}"
+
+    try:
+        # Prepare env with CWD in PYTHONPATH
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.path.join(os.getcwd(), env.get("PYTHONPATH", ""))
+
+        # Start server as a background process
+        SERVER_PROCESS = subprocess.Popen(
+            [sys.executable, abs_path, str(port)],
+            cwd=os.getcwd(),
+            env=env,
+            stdout=None, # Inherit for debug visibility or pipe if needed
+            stderr=None
+        )
+        # Give it a moment to start
+        time.sleep(2)
+        if SERVER_PROCESS.poll() is not None:
+             out, err = SERVER_PROCESS.communicate() if SERVER_PROCESS.stdout else (b"", b"")
+             return f"Failed to start server. Exit code: {SERVER_PROCESS.returncode}."
+             
+        return f"Server started in {mode} mode on port {port}."
+    except Exception as e:
+        return f"Failed to start server: {e}"
+
+@tool
+def connect_client(host: str = "localhost", port: int = 9093) -> str:
+    """
+    Connects the client to the microscope server using Pyro5.
+    
+    Args:
+        host: Server host.
+        port: Server port.
+    """
+    global PROXY
+    try:
+        uri = f"PYRO:tem.server@{host}:{port}"
+        PROXY = Pyro5.api.Proxy(uri)
+        # Test connection by calling a simple method
+        # get_instrument_status tends to be safe
+        status = PROXY.get_instrument_status()
+        return f"Connected successfully. Microscope Status: {status}"
+    except Exception as e:
+        PROXY = None
+        return f"Connection error: {e}"
+
+@tool
+def adjust_magnification(amount: float) -> str:
     """
     Adjusts the microscope magnification level.
     
     Args:
-        amount: The magnification level to set (e.g., 10.0, 40.0).
+        amount: The magnification level to set.
     """
-    print(f"Adjusting magnification by {amount}")
-    return {"status": "success", "magnification": amount}
+    global PROXY
+    if not PROXY:
+        return "Error: Client not connected. Use connect_client first."
+    
+    try:
+        # smart_proxy.py doesn't have set_magnification directly but has device_settings or set_microscope_status.
+        PROXY.set_microscope_status(parameter='magnification', value=amount)
+        return f"Magnification set to {amount}"
+    except Exception as e:
+        return f"Error adjusting magnification: {e}"
 
 @tool
-def capture_image() -> dict:
+def capture_image(size: int = 512, dwell_time: float = 2e-6) -> str:
     """
     Captures an image from the current microscope view.
+    
+    Args:
+        size: Image size (width/height).
+        dwell_time: Dwell time in seconds.
     """
-    print("Capturing image")
-    return {"status": "success", "image_path": "/tmp/dummy_capture.png"}
+    global PROXY
+    if not PROXY:
+        return "Error: Client not connected. Use connect_client first."
+        
+    try:
+        # acquire_image returns (list, shape, dtype) tuple in base_proxy logic
+        # server_mock also returns this.
+        # device_name='ceta_camera' or 'wobbler_camera'
+        result = PROXY.acquire_image(device_name='ceta_camera', size=size)
+        
+        if not result:
+            return "Failed to capture image (None returned)."
+            
+        data_list, shape, dtype_str = result
+        arr = np.array(data_list, dtype=dtype_str).reshape(shape)
+
+        output_path = f"/tmp/microscope_capture_{int(time.time())}.npy"
+        np.save(output_path, arr)
+        return f"Image captured and saved to {output_path} (Shape: {arr.shape})"
+    except Exception as e:
+        return f"Error capturing image: {e}"
 
 @tool
-def close_microscope() -> dict:
+def close_microscope() -> str:
     """
-    Safely closes the microscope connection.
+    Safely closes the microscope connection and stops the server.
     """
-    print("Closing microscope")
-    return {"status": "success"}
+    global SERVER_PROCESS, PROXY
+    resp = "Microscope closed."
+    
+    if PROXY:
+        try:
+            PROXY.close()
+        except:
+            pass
+        PROXY = None
+    
+    if SERVER_PROCESS:
+        SERVER_PROCESS.terminate()
+        SERVER_PROCESS = None
+        resp += " Server stopped."
+        
+    return resp
+
+@tool
+def get_stage_position() -> str:
+    """
+    Get the current stage position (x, y, z).
+    """
+    global PROXY
+    if not PROXY:
+        return "Error: Client not connected."
+    
+    try:
+        pos = PROXY.get_stage()
+        return f"Stage Position: {pos}"
+    except Exception as e:
+        return f"Error getting stage position: {e}"
