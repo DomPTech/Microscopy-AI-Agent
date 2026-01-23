@@ -39,10 +39,13 @@ class Agent:
         # Full tool suite for the microscopy agent
         self.agent = CodeAgent(
             tools=[
-                DuckDuckGoSearchTool(), 
+                # DuckDuckGoSearchTool(), 
                 adjust_magnification,
                 capture_image,
-                close_microscope
+                close_microscope,
+                start_server,
+                connect_client,
+                get_stage_position,
             ], 
             model=self.model, 
             stream_outputs=True
