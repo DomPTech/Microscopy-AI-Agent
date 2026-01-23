@@ -1,4 +1,5 @@
 # Microscopy-AI-Agent-Demo
+This research is designed to facilitate autonomous control of Scanning Transmission Electron Microscopes through utilization of a local LLM. The specific machine that this software is designed for is the ThermoFisher Spectra 300 TEM. 
 
 ## Project Diagram
 

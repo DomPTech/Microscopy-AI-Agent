@@ -1,6 +1,6 @@
 import torch
 from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool
-from app.tools.microscopy import adjust_magnification, capture_image, close_microscope
+from app.tools.microscopy import adjust_magnification, capture_image, close_microscope, start_server, connect_client, get_stage_position
 from app.utils.helpers import get_total_ram_gb
 
 class Agent:
