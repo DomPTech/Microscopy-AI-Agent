@@ -5,13 +5,14 @@ import sys
 # Ensure package is resolvable
 
 from app.tools.microscopy import start_server, connect_client, adjust_magnification, capture_image, close_microscope, get_stage_position
+from app.config import settings
 
 def run_test():
     print("--- Starting Integration Test ---")
     
     # Start server (Mock)
     print("\n1. Starting Mock Server...")
-    res = start_server(mode="mock", port=9093)
+    res = start_server(mode="real", port=settings.server_port)
     print(res)
     if "Failed" in res:
         return
@@ -20,7 +21,7 @@ def run_test():
     print("\n2. Connecting Client...")
     # Give it a sec
     time.sleep(1)
-    res = connect_client(host="127.0.0.1", port=9093)
+    res = connect_client(host=settings.server_host, port=settings.server_port)
     print(res)
     if "Failed" in res or "error" in res.lower():
         close_microscope()

@@ -7,6 +7,7 @@ from smolagents import tool
 import Pyro5.api
 import Pyro5.errors
 import numpy as np
+from app.config import settings
 
 # Global state for the client and server process
 # PROXY is the Pyro5 proxy object
@@ -14,14 +15,16 @@ PROXY: Optional[object] = None
 SERVER_PROCESS: Optional[subprocess.Popen] = None
 
 @tool
-def start_server(mode: str = "mock", port: int = 9093) -> str:
+def start_server(mode: str = "mock", port: int = None) -> str:
     """
     Starts the microscope server (Smart Proxy).
     
     Args:
         mode: "mock" for testing/simulation, "real" for actual hardware.
-        port: Port to run the server on (default 9093).
+        port: Port to run the server on (default from config).
     """
+    if port is None:
+        port = settings.server_port
     global SERVER_PROCESS
     if SERVER_PROCESS and SERVER_PROCESS.poll() is None:
         return "Server is already running."
@@ -49,7 +52,7 @@ def start_server(mode: str = "mock", port: int = 9093) -> str:
         # Start server - smart_proxy.py from asyncroscopy repo
         # usage: smart_proxy.py [host] [port]
         SERVER_PROCESS = subprocess.Popen(
-            [sys.executable, "-u", script_path, "127.0.0.1", str(port)],
+            [sys.executable, "-u", script_path, settings.server_host, str(port)],
             cwd=base_dir,
             env=env,
             stdout=subprocess.PIPE, 
@@ -80,14 +83,16 @@ def start_server(mode: str = "mock", port: int = 9093) -> str:
         return f"Failed to start server: {e}"
 
 @tool
-def connect_client(host: str = "127.0.0.1", port: int = 9093) -> str:
+def connect_client(host: str = None, port: int = None) -> str:
     """
     Connects the client to the microscope server using Pyro5.
     
     Args:
-        host: Server host (default "127.0.0.1").
-        port: Server port (default 9093).
+        host: Server host (default from config).
+        port: Server port (default from config).
     """
+    if host is None: host = settings.server_host
+    if port is None: port = settings.server_port
     global PROXY
     try:
         uri = f"PYRO:tem.server@{host}:{port}"

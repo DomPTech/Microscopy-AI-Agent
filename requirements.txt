@@ -13,5 +13,6 @@ sidpy
 scipy
 matplotlib
 scikit-image
-
+pydantic
+pydantic-settings
 -e asyncroscopy_repo
