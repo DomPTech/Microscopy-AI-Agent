@@ -39,22 +39,35 @@ class MicroscopeControl:
             self._connect()
 
     def _connect(self):
-        """Connect to the Pyro5 server if not in simulation mode."""
+        """Connect to the central server if not in simulation mode."""
         try:
-            import Pyro5.api
-            uri = f"PYRO:TEMServer@{settings.server_host}:{settings.server_port}"
-            self._client = Pyro5.api.Proxy(uri)
+            from asyncroscopy.clients.notebook_client import NotebookClient
+            self._client = NotebookClient(host=settings.server_host, port=9000)
+            # Verify connection or wait for central server
+            print(f"Connected to Central Server at {settings.server_host}:9000")
         except Exception as e:
-            print(f"Failed to connect to microscope server: {e}")
+            print(f"Failed to connect to microscope central server: {e}")
             self.sim_mode = True
 
-    def get_stage_position(self) -> StagePosition:
+    def get_stage_position(self, destination: str = "AS") -> StagePosition:
         """Get the current stage position."""
         if self.sim_mode:
             return StagePosition(x=100.0, y=100.0, z=0.0)
         
-        # asyncroscopy returns stage in nm/deg, we convert to microns
-        raw_pos = self._client.get_stage()
+        # asyncroscopy returns stage in nm/deg
+        raw_pos = self._client.send_command(destination, "get_stage")
+        
+        # Mapping depends on whether AS_server_AtomBlastTwin or another is used
+        # AtomBlastTwin returns random list [x, y, z, r, t]
+        if isinstance(raw_pos, (list, np.ndarray)):
+            return StagePosition(
+                x=raw_pos[0] / 1000.0,
+                y=raw_pos[1] / 1000.0,
+                z=raw_pos[2] / 1000.0,
+                rotation=raw_pos[3],
+                tilt=raw_pos[4]
+            )
+        
         return StagePosition(
             x=raw_pos['x'] / 1000.0,
             y=raw_pos['y'] / 1000.0,
@@ -63,7 +76,7 @@ class MicroscopeControl:
             tilt=raw_pos.get('t')
         )
 
-    def set_stage_position(self, pos: StagePosition, relative: bool = False) -> StagePosition:
+    def set_stage_position(self, pos: StagePosition, relative: bool = False, destination: str = "AS") -> StagePosition:
         """Set the stage position with safety checks."""
         # Validation is handled by Pydantic model initialization
         if self.sim_mode:
@@ -79,10 +92,10 @@ class MicroscopeControl:
         if pos.rotation is not None: target['r'] = pos.rotation
         if pos.tilt is not None: target['t'] = pos.tilt
 
-        self._client.set_stage(target, relative=relative)
-        return self.get_stage_position()
+        self._client.send_command(destination, "set_stage", {"pos": target, "relative": relative})
+        return self.get_stage_position(destination=destination)
 
-    def acquire_image(self, detector: str = "Ceta") -> ImageResult:
+    def acquire_image(self, detector: str = "Ceta", destination: str = "AS") -> ImageResult:
         """Acquire an image from the specified detector."""
         if self.sim_mode:
             print(f"SIMULATOR: Acquiring image from {detector}")
@@ -91,17 +104,21 @@ class MicroscopeControl:
             return ImageResult(data=dummy_data, metadata={"detector": detector, "mode": "simulated"})
 
         try:
-            img = self._client.acquire_image(detector)
+            img = self._client.send_command(destination, "get_scanned_image", {
+                "scanning_detector": detector,
+                "size": 512,
+                "dwell_time": 2e-6
+            })
             return ImageResult(data=img, metadata={"detector": detector})
         except Exception as e:
             print(f"Error acquiring image: {e}")
             raise
 
-    def set_beam_position(self, x: float, y: float) -> bool:
+    def set_beam_position(self, x: float, y: float, destination: str = "AS") -> bool:
         """Set the beam position in nm."""
         if self.sim_mode:
             print(f"SIMULATOR: Setting beam position to ({x}, {y})")
             return True
         
-        self._client.set_probe_position(x, y)
+        self._client.send_command(destination, "place_beam", {"x": x, "y": y})
         return True

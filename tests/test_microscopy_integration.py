@@ -12,7 +12,7 @@ def run_test():
     
     # Start server (Mock)
     print("\n1. Starting Mock Server...")
-    res = start_server(mode="real", port=settings.server_port)
+    res = start_server(mode="mock")
     print(res)
     if "Failed" in res:
         return
@@ -21,7 +21,7 @@ def run_test():
     print("\n2. Connecting Client...")
     # Give it a sec
     time.sleep(1)
-    res = connect_client(host=settings.server_host, port=settings.server_port)
+    res = connect_client(host=settings.server_host)
     print(res)
     if "Failed" in res or "error" in res.lower():
         close_microscope()
@@ -39,8 +39,8 @@ def run_test():
 
     # Capture image
     print("\n5. Capturing Image...")
-    res = capture_image(size=256, dwell_time=1e-6)
-    print(res)
+    capture_result = capture_image(detector="Ceta")
+    print(capture_result)
 
     # Close microscope
     print("\n6. Closing Microscope...")

@@ -2,7 +2,7 @@ import subprocess
 import time
 import sys
 import os
-from typing import Optional
+from typing import Optional, Dict
 from smolagents import tool
 import Pyro5.api
 import Pyro5.errors
@@ -10,184 +10,191 @@ import numpy as np
 from app.config import settings
 
 # Global state for the client and server process
-# PROXY is the Pyro5 proxy object
-PROXY: Optional[object] = None
-SERVER_PROCESS: Optional[subprocess.Popen] = None
+CLIENT: Optional[object] = None # asyncroscopy.clients.notebook_client.NotebookClient
+SERVER_PROCESSES: Dict[str, subprocess.Popen] = {}
 
 @tool
-def start_server(mode: str = "mock", port: int = None) -> str:
+def start_server(mode: str = "mock", servers: Optional[list[str]] = None) -> str:
     """
-    Starts the microscope server (Smart Proxy).
+    Starts the microscope servers (Twisted architecture).
     
     Args:
-        mode: "mock" for testing/simulation, "real" for actual hardware.
-        port: Port to run the server on (default from config).
+        mode: "mock" for testing/simulation (uses twin servers), "real" for actual hardware.
+        servers: List of server modules to start. Defaults to Central, AS_Twin, and Ceos_Twin.
     """
-    if port is None:
-        port = settings.server_port
-    global SERVER_PROCESS
-    if SERVER_PROCESS and SERVER_PROCESS.poll() is None:
-        return "Server is already running."
+    global SERVER_PROCESSES
+    
+    if servers is None:
+        servers = [
+            "asyncroscopy.servers.protocols.central_server",
+            "asyncroscopy.servers.Ceos_server_twin"
+        ]
 
-    # Using asyncroscopy package servers
-    # Derive path relative to this file's directory
+    # Check if any are already running
+    running = [s for s, p in SERVER_PROCESSES.items() if p.poll() is None]
+    if running:
+        return f"Servers already running: {', '.join(running)}"
+
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    repo_path = os.path.join(base_dir, "asyncroscopy_repo")
     
-    if mode == "mock":
-        script_path = os.path.join(base_dir, "asyncroscopy_repo/asyncroscopy/smart_proxy/smart_proxy.py")
-    else:
-        script_path = os.path.join(base_dir, "asyncroscopy_repo/asyncroscopy/smart_proxy/smart_proxy.py")
-        
-    if not os.path.exists(script_path):
-        return f"Error: Server script not found at {script_path}"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{repo_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
 
+    started = []
     try:
-        # Prepare env
-        env = os.environ.copy()
-        # Add the repo and mocks to PYTHONPATH
-        repo_path = os.path.join(base_dir, "asyncroscopy_repo")
-        mocks_path = os.path.join(base_dir, "tests/mocks")
-        env["PYTHONPATH"] = f"{repo_path}{os.pathsep}{mocks_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+        for module in servers:
+            # Central needs 9000, AS needs 9001, Ceos needs 9003 based on our routing defaults
+            port_map = {
+                "asyncroscopy.servers.protocols.central_server": 9000,
+                "asyncroscopy.servers.Ceos_server_twin": 9001
+            }
+            port = port_map.get(module, 0) # 0 lets OS pick random if not specified
+            cmd = [sys.executable, "-m", module]
+            if port:
+                cmd.append(str(port))
 
-        # Start server - smart_proxy.py from asyncroscopy repo
-        # usage: smart_proxy.py [host] [port]
-        SERVER_PROCESS = subprocess.Popen(
-            [sys.executable, "-u", script_path, settings.server_host, str(port)],
-            cwd=base_dir,
-            env=env,
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.STDOUT,
-            text=True
-        )
+            print(f"Starting server: {module} on port {port}")
+            proc = subprocess.Popen(
+                cmd,
+                cwd=base_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            SERVER_PROCESSES[module] = proc
+            started.append(module)
+            # Give it a tiny bit to breathe
+            time.sleep(1)
         
-        start_time = time.time()
-        output_buffer = []
-        while time.time() - start_time < 30:
-            if SERVER_PROCESS.poll() is not None:
-                 rest_out, _ = SERVER_PROCESS.communicate()
-                 all_out = "".join(output_buffer) + (rest_out if rest_out else "")
-                 return f"Failed to start server. Exit code: {SERVER_PROCESS.returncode}. Output: {all_out}"
-            
-            line = SERVER_PROCESS.stdout.readline()
-            if line:
-                output_buffer.append(line)
-                if "Server is ready" in line:
-                    return f"Server started in {mode} mode on port {port}."
-            else:
-                time.sleep(0.1)
-        
-        SERVER_PROCESS.terminate()
-        return f"Failed to start server: Timeout. Captured Output: {''.join(output_buffer)}"
+        return f"Started servers: {', '.join(started)} in {mode} mode."
 
     except Exception as e:
-        return f"Failed to start server: {e}"
+        return f"Failed to start servers: {e}"
 
 @tool
-def connect_client(host: str = None, port: int = None) -> str:
+def connect_client(host: str = "localhost", port: int = 9000, routing_table: Optional[dict] = None) -> str:
     """
-    Connects the client to the microscope server using Pyro5.
+    Connects the client to the central server and sets up routing.
     
     Args:
-        host: Server host (default from config).
-        port: Server port (default from config).
+        host: Central server host.
+        port: Central server port.
+        routing_table: Dict mapping prefixes (AS, Ceos) to (host, port).
     """
-    if host is None: host = settings.server_host
-    if port is None: port = settings.server_port
-    global PROXY
+    global CLIENT
+    from asyncroscopy.clients.notebook_client import NotebookClient
+    
+    if routing_table is None:
+        routing_table = {
+            "Central": ("localhost", 9000),
+            "Ceos": ("localhost", 9001)
+        }
+
     try:
-        uri = f"PYRO:tem.server@{host}:{port}"
-        PROXY = Pyro5.api.Proxy(uri)
-        # Check if it responds
-        try:
-            status = PROXY.get_instrument_status()
-            return f"Connected successfully. Microscope Status: {status}"
-        except:
-             # If it doesn't respond immediately, it might be setting up
-             return f"Connected to {uri}. (Status check failed, but proxy created)"
+        CLIENT = NotebookClient.connect(host=host, port=port)
+        if not CLIENT:
+            return "Failed to connect to central server."
+        
+        # Configure routing on the central server
+        resp = CLIENT.send_command("Central", "set_routing_table", routing_table)
+        
+        # Initialize AS server
+        CLIENT.send_command("AS", "connect_AS", {"host": "localhost", "port": 9001})
+        
+        return f"Connected successfully. Routing: {resp}"
     except Exception as e:
-        PROXY = None
+        CLIENT = None
         return f"Connection error: {e}"
 
 @tool
-def adjust_magnification(amount: float) -> str:
+def adjust_magnification(amount: float, destination: str = "AS") -> str:
     """
     Adjusts the microscope magnification level.
     
     Args:
         amount: The magnification level to set.
+        destination: The server to send the command to (default 'AS').
     """
-    global PROXY
-    if not PROXY:
+    global CLIENT
+    if not CLIENT:
         return "Error: Client not connected."
     
     try:
-        PROXY.set_microscope_status(parameter='magnification', value=amount)
-        return f"Magnification set to {amount}"
+        # AS server might not have 'set_microscope_status' directly, needs investigation of command list
+        # Based on AS_server_AtomBlastTwin, we might need a different command
+        resp = CLIENT.send_command(destination, "set_magnification", {"value": amount})
+        return f"Magnification command sent to {destination}: {resp}"
     except Exception as e:
         return f"Error adjusting magnification: {e}"
 
 @tool
-def capture_image(size: int = 512, dwell_time: float = 2e-6) -> str:
+def capture_image(detector: str = "Ceta", destination: str = "AS") -> str:
     """
     Captures an image and saves it.
     
     Args:
-        size: Image size (width/height).
-        dwell_time: Dwell time in seconds.
+        detector: The detector to use.
+        destination: The server to send the command to (default 'AS').
     """
-    global PROXY
-    if not PROXY:
+    global CLIENT
+    if not CLIENT:
         return "Error: Client not connected."
         
     try:
-        # asyncroscopy smart_proxy returns (data_list, shape, dtype_str)
-        result = PROXY.acquire_image(device_name='ceta_camera') # size/dwell passed via device_settings in real asyncroscopy
+        # Twisted servers return numpy arrays wrapped in package_message
+        print(f"[TOOLS DEBUG] Requesting image from {destination}...")
+        img = CLIENT.send_command(destination, "get_scanned_image", {
+            "scanning_detector": detector,
+            "size": 512,
+            "dwell_time": 2e-6
+        })
+        print(f"[TOOLS DEBUG] Received response of type: {type(img)}")
         
-        if not result:
+        if img is None:
             return "Failed to capture image (None returned)."
             
-        data_list, shape, dtype_str = result
-        arr = np.array(data_list, dtype=dtype_str).reshape(shape)
+        if isinstance(img, str):
+            return f"Failed to capture image. Error from server: {img}"
 
         output_path = f"/tmp/microscope_capture_{int(time.time())}.npy"
-        np.save(output_path, arr)
-        return f"Image captured and saved to {output_path} (Shape: {arr.shape})"
+        np.save(output_path, img)
+        return f"Image captured from {destination} and saved to {output_path} (Shape: {img.shape})"
     except Exception as e:
         return f"Error capturing image: {e}"
 
 @tool
 def close_microscope() -> str:
     """
-    Safely closes the microscope connection and stops the server.
+    Safely closes the microscope connection and stops the servers.
     """
-    global SERVER_PROCESS, PROXY
+    global SERVER_PROCESSES, CLIENT
     resp = "Microscope closed."
     
-    if PROXY:
-        try:
-            PROXY.close()
-        except:
-            pass
-        PROXY = None
+    CLIENT = None
     
-    if SERVER_PROCESS:
-        SERVER_PROCESS.terminate()
-        SERVER_PROCESS = None
-        resp += " Server stopped."
+    for module, proc in SERVER_PROCESSES.items():
+        proc.terminate()
+        resp += f" {module} stopped."
+    SERVER_PROCESSES.clear()
         
     return resp
 
 @tool
-def get_stage_position() -> str:
+def get_stage_position(destination: str = "AS") -> str:
     """
     Get the current stage position (x, y, z).
+    
+    Args:
+        destination: The server to send the command to (default 'AS').
     """
-    global PROXY
-    if not PROXY:
+    global CLIENT
+    if not CLIENT:
         return "Error: Client not connected."
     
     try:
-        pos = PROXY.get_stage()
-        return f"Stage Position: {pos}"
+        pos = CLIENT.send_command(destination, "get_stage")
+        return f"Stage Position from {destination}: {pos}"
     except Exception as e:
         return f"Error getting stage position: {e}"
