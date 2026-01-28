@@ -48,6 +48,14 @@ class Agent:
                 get_stage_position,
             ], 
             model=self.model, 
+            additional_authorized_imports=["app.tools.microscopy", "numpy", "time", "os", "scipy", "matplotlib", "skimage"],
+            instructions="""
+            You are an expert microscopy AI assistant. 
+            You can control the microscope by starting the server, connecting the client, and then using tools to adjust magnification, capture images, and move the stage.
+            When starting the server, you should typically use mode='mock' for simulations.
+            Available servers are MicroscopeServer.Central, MicroscopeServer.AS, and MicroscopeServer.Ceos, and MicroscopeServer can be imported from app.tools.microscopy.
+            Always remember to close the microscope connection when the task is complete.
+            """,
             stream_outputs=True
         )
 
