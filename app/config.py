@@ -31,6 +31,8 @@ class MicroscopeSettings(BaseSettings):
     instrument_host: str = Field("localhost", description="IP/Hostname of the microscope instrument PC")
     instrument_port: int = Field(9001, description="Port the AutoScript server is listening on (AutoScript default is often 9007, check your setup)")
 
+    autoscript_port: int = Field(9091, description="Port that the autoscript server is running on")
+
     # Simulation Mode
     sim_mode: bool = Field(True, description="Enable dry-run/simulator mode by default")
 
