@@ -21,7 +21,10 @@ dependencies = [
     "scipy",
     "matplotlib",
     "scikit-image",
-    "ase",
+    "pydantic",
+    "pydantic-settings",
+    "pytest",
+    "asyncroscopy @ file://./external/asyncroscopy",
 ]
 
 [tool.setuptools.packages.find]

@@ -15,4 +15,5 @@ matplotlib
 scikit-image
 pydantic
 pydantic-settings
+pytest
 -e external/asyncroscopy

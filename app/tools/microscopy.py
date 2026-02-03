@@ -256,3 +256,120 @@ def get_stage_position(destination: str = "AS") -> str:
         return f"Stage Position from {destination}: {pos}"
     except Exception as e:
         return f"Error getting stage position: {e}"
+
+@tool
+def calibrate_screen_current(destination: str = "AS") -> str:
+    """
+    Calibrates the gun lens values to screen current.
+    Start with screen current at ~100 pA. Screen must be inserted.
+    
+    Args:
+        destination: The server to send the command to (default 'AS').
+    """
+    global CLIENT
+    if not CLIENT:
+        return "Error: Client not connected."
+    
+    try:
+        resp = CLIENT.send_command(destination, "calibrate_screen_current")
+        return f"Screen current calibration: {resp}"
+    except Exception as e:
+        return f"Error calibrating screen current: {e}"
+
+@tool
+def set_screen_current(current_pa: float, destination: str = "AS") -> str:
+    """
+    Sets the screen current (via gun lens). Must have screen current calibrated first.
+    
+    Args:
+        current_pa: The target current in picoamperes (pA).
+        destination: The server to send the command to (default 'AS').
+    """
+    global CLIENT
+    if not CLIENT:
+        return "Error: Client not connected."
+    
+    try:
+        resp = CLIENT.send_command(destination, "set_current", {"current": current_pa})
+        return f"Set current response: {resp}"
+    except Exception as e:
+        return f"Error setting current: {e}"
+
+@tool
+def place_beam(x: float, y: float, destination: str = "AS") -> str:
+    """
+    Sets the resting beam position.
+    
+    Args:
+        x: Normalized X position [0:1].
+        y: Normalized Y position [0:1].
+        destination: The server to send the command to (default 'AS').
+    """
+    global CLIENT
+    if not CLIENT:
+        return "Error: Client not connected."
+    
+    try:
+        resp = CLIENT.send_command(destination, "place_beam", {"x": x, "y": y})
+        return f"Beam move response: {resp}"
+    except Exception as e:
+        return f"Error placing beam: {e}"
+
+@tool
+def blank_beam(destination: str = "AS") -> str:
+    """
+    Blanks the electron beam.
+    
+    Args:
+        destination: The server to send the command to (default 'AS').
+    """
+    global CLIENT
+    if not CLIENT:
+        return "Error: Client not connected."
+    
+    try:
+        resp = CLIENT.send_command(destination, "blank_beam")
+        return f"Blank beam response: {resp}"
+    except Exception as e:
+        return f"Error blanking beam: {e}"
+
+@tool
+def unblank_beam(duration: Optional[float] = None, destination: str = "AS") -> str:
+    """
+    Unblanks the electron beam.
+    
+    Args:
+        duration: Optional dwell time in seconds. If provided, the beam will auto-blank after this time.
+        destination: The server to send the command to (default 'AS').
+    """
+    global CLIENT
+    if not CLIENT:
+        return "Error: Client not connected."
+    
+    args = {}
+    if duration is not None:
+        args["duration"] = duration
+    
+    try:
+        resp = CLIENT.send_command(destination, "unblank_beam", args)
+        return f"Unblank beam response: {resp}"
+    except Exception as e:
+        return f"Error unblanking beam: {e}"
+
+@tool
+def get_microscope_status(destination: str = "AS") -> str:
+    """
+    Returns the current status of the microscope server.
+    
+    Args:
+        destination: The server to query (default 'AS').
+    """
+    global CLIENT
+    if not CLIENT:
+        return "Error: Client not connected."
+    
+    try:
+        resp = CLIENT.send_command(destination, "get_status")
+        return f"Microscope Status: {resp}"
+    except Exception as e:
+        return f"Error getting status: {e}"
