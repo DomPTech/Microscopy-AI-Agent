@@ -13,11 +13,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import torch
-from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool
+from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool, PlanningStep
 from smolagents.agents import ActionOutput
 from smolagents.memory import FinalAnswerStep
 from smolagents.models import ChatMessageStreamDelta
-from app.tools.microscopy import TOOLS
+from app.tools.microscopy import TOOLS, MicroscopeServer
 from app.utils.helpers import get_total_ram_gb
 
 class Agent:
@@ -57,6 +57,8 @@ class Agent:
         self.agent = CodeAgent(
             tools=TOOLS, 
             model=self.model, 
+            planning_interval=5,
+            step_callbacks={PlanningStep: self.interrupt_after_plan},
             additional_authorized_imports=[
                 "app.tools.microscopy", "app.config", 
                 "numpy", "time", "os", "scipy", "matplotlib", "skimage"
@@ -69,6 +71,8 @@ class Agent:
             - Control the electron beam (blank/unblank, place beam).
             - Calibrate and set screen current.
             - And more.
+
+            You can also design structuered Experiments using submit_experiment.
             
             Default context & assumptions (use these unless the user specifies otherwise):
             - Always start servers and connect to the client when asked to do anything on the microscope.
@@ -93,6 +97,15 @@ class Agent:
             stream_outputs=True
         )
 
+        # Preload common classes into the Python executor context
+        try:
+            self.agent.python_executor.send_variables({
+                "MicroscopeServer": MicroscopeServer,
+            })
+        except Exception:
+            # Non-fatal: some executors may not support variable injection
+            pass
+
     def chat(self, query: str) -> str:
         """
         Process user input and return a response.
@@ -116,3 +129,32 @@ class Agent:
 
         if final_output is not None:
             yield {"type": "final", "content": str(final_output)}
+
+    def interrupt_after_plan(self, memory_step, agent):
+        """
+        Example of an interrupt callback that could be used to stop the agent after the planning step.
+        """
+        if isinstance(memory_step, PlanningStep):
+            while True:
+                print("User choices: ")
+                print("1. Approve plan")
+                print("2. Modify plan")
+                print("3. Reject plan and stop execution")
+                choice = input("Enter your choice (1/2/3): ").strip()
+                if choice == '1':
+                    break
+                elif choice == '2':
+                    new_plan = input("Enter your modifications to the plan: ")
+                    if new_plan.strip():
+                        memory_step.plan = new_plan
+                        print("Plan updated. Continuing execution.")
+                    else:
+                        print("No modifications entered. Continuing with original plan.")
+                    break
+                elif choice == '3':
+                    print("Execution interrupted by user.")
+                    raise KeyboardInterrupt("Execution interrupted by user during planning.")
+                else:
+                    print("Invalid choice. Please enter 1, 2, or 3.")
+            return True
+        return False

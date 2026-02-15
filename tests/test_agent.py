@@ -14,7 +14,7 @@ def main():
     agent = Agent(model_id=model_name)
 
     # Define the prompt to test
-    prompt = "Get me the stage position on a mock microscope."
+    prompt = "Execute an experiment to get an image on a mock microscope."
 
     # Call the agent with the prompt
     response = agent.chat(prompt)
