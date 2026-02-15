@@ -13,12 +13,13 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import torch
-from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool, PlanningStep
+from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool, PlanningStep, ActionStep
 from smolagents.agents import ActionOutput
 from smolagents.memory import FinalAnswerStep
 from smolagents.models import ChatMessageStreamDelta
 from app.tools.microscopy import TOOLS, MicroscopeServer
 from app.utils.helpers import get_total_ram_gb
+from app.agent.supervised_executor import SupervisedExecutor
 
 class Agent:
     def __init__(self, model_id: str = "Auto"):
@@ -59,10 +60,10 @@ class Agent:
             model=self.model, 
             planning_interval=5,
             step_callbacks={PlanningStep: self.interrupt_after_plan},
-            additional_authorized_imports=[
+            executor=SupervisedExecutor(additional_authorized_imports=[
                 "app.tools.microscopy", "app.config", 
                 "numpy", "time", "os", "scipy", "matplotlib", "skimage"
-            ],
+            ]),
             instructions="""
             You are an expert microscopy AI assistant. 
             You can control the microscope by starting the server, connecting the client, and then using tools to:
@@ -132,7 +133,7 @@ class Agent:
 
     def interrupt_after_plan(self, memory_step, agent):
         """
-        Example of an interrupt callback that could be used to stop the agent after the planning step.
+        An interrupt callback to stop the agent after the planning step.
         """
         if isinstance(memory_step, PlanningStep):
             while True:
