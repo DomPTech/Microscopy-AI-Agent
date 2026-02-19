@@ -10,6 +10,7 @@ import Pyro5.errors
 import numpy as np
 from app.config import settings
 from enum import Enum
+import pyTEMlib.probe_tools as pt
 
 # Global state for the client and server process
 CLIENT: Optional[object] = None # asyncroscopy.clients.notebook_client.NotebookClient
@@ -55,7 +56,8 @@ def start_server(mode: str = "mock", servers: Optional[list[MicroscopeServer]] =
     
     Args:
         mode: "mock" for testing/simulation (uses twin servers), "real" for actual hardware.
-        servers: List of server modules to start. Available options:
+        servers: List of server modules to start (MicroscopeServer Enum constants).
+            Example: [MicroscopeServer.Central, MicroscopeServer.AS]. Available options:
             - MicroscopeServer.Central: The main control server (Port 9000).
             - MicroscopeServer.AS: The AS server or its twin (Port 9001).
             - MicroscopeServer.Ceos: The Ceos server or its twin (Port 9003).
@@ -611,3 +613,27 @@ def submit_experiment(experiment_design: Dict[str, Any]) -> str:
 
 # Add the new tool to the exported list
 TOOLS.append(submit_experiment)
+
+@tool
+def get_probe(aberrations: dict, size_x: int = 128, size_y: int = 128, verbose: bool = True) -> dict:
+    """
+    Converts microscope-derived aberration coefficients into a 2D electron probe.
+    
+    This is ideal for processing 'Tableau' data or direct hardware feedback to visualize 
+    the current state of the electron beam.
+
+    Args:
+        aberrations: The dictionary of aberrations received from the microscope (e.g., from 'acquireTableau').
+                     Must contain 'acceleration_voltage', 'convergence_angle', and 'FOV'.
+        size_x: The pixel resolution of the output grid in x-direction. Default is 128.
+        size_y: The pixel resolution of the output grid in y-direction. Default is 128.
+        verbose: If True, outputs calculation metadata such as wavelength.
+
+    Returns:
+        A dictionary containing the 'probe' intensity map, the 'aperture' function, 
+        and the 'chi' phase aberration function.
+    """
+
+    return pt.get_probe(aberrations, size_x=size_x, size_y=size_y, verbose=verbose)
+
+TOOLS.append(get_probe)

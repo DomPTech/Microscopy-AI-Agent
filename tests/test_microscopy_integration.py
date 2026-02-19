@@ -3,6 +3,9 @@ import os
 import sys
 import pytest
 import numpy as np
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.tools.microscopy import *
 from app.config import settings
 

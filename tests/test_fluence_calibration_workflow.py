@@ -3,6 +3,9 @@ import pytest
 import numpy as np
 import sys
 import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.tools.microscopy import (
     start_server, connect_client, close_microscope,
     discover_commands, get_ceos_info, calibrate_screen_current,
@@ -10,27 +13,9 @@ from app.tools.microscopy import (
     tune_C1A1, acquire_tableau
 )
 from app.config import settings
+import pyTEMlib.probe_tools as pt
 
 # Based on the fluence notebook in asyncroscopy
-
-# Handle pyTEMlib availability and version differences
-try:
-    import pyTEMlib.probe_tools as pt
-    if not hasattr(pt, 'aberrations'):
-        if hasattr(pt, 'get_probe'):
-            pt.aberrations = pt.get_probe
-        else:
-            print("Warning: Neither pt.aberrations nor pt.get_probe found. Using mock fallback.")
-            def mock_aberrations(tableau, size_x, size_y, verbose=False):
-                return np.random.rand(size_x, size_y), {}, 0.1
-            pt.aberrations = mock_aberrations
-except ImportError:
-    from unittest.mock import MagicMock
-    print("Warning: pyTEMlib library not found. Using MagicMock.")
-    pt = MagicMock()
-    def mock_aberrations(tableau, size_x, size_y, verbose=False):
-        return np.random.rand(size_x, size_y), {}, 0.1
-    pt.aberrations = mock_aberrations
 
 @pytest.fixture(scope="module", autouse=True)
 def microscope_setup():
@@ -98,7 +83,7 @@ def test_fluence_calibration_workflow():
         
         ab_list.append(aberrations)
         
-        probe, A_k, chi = pt.aberrations(aberrations, 128, 128, verbose=True)
+        probe, A_k, chi = pt.get_probe(aberrations, 128, 128, verbose=True)
 
         probes.append(probe)
         

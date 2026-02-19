@@ -26,6 +26,7 @@ except ImportError:
     pt = None
 import numpy as np
 from app.tools import microscopy
+from app.config import settings
 
 class MicroscopeClientProxy:
     """Proxy to forward calls to the active global CLIENT instance."""
@@ -59,7 +60,7 @@ class Agent:
             model_id=model_id,
             max_new_tokens=1024,
             device_map="mps" if torch.backends.mps.is_available() else "auto",
-            torch_dtype=torch.float16 if torch.backends.mps.is_available() else torch.float32,
+            torch_dtype=torch.bfloat16,
             trust_remote_code=True,
             model_kwargs={
                 "low_cpu_mem_usage": low_cpu_mem_usage,
@@ -74,7 +75,7 @@ class Agent:
             planning_interval=5,
             step_callbacks={PlanningStep: self.interrupt_after_plan},
             executor=SupervisedExecutor(additional_authorized_imports=[
-                "app.tools.microscopy", "app.config", 
+                "app.tools.microscopy", "app.config.*", 
                 "numpy", "time", "os", "scipy", "matplotlib", "skimage"
             ]),
             instructions="""
@@ -95,8 +96,7 @@ class Agent:
             - Use mode='mock' unless the user explicitly requests real hardware.
             
             Guidelines:
-            1. Use 'app.config.settings' for configuration:
-               - Import 'settings' from 'app.config'.
+            1. Use 'settings' for configuration:
                - Use 'settings.server_host' and 'settings.server_port' for connections.
                - Use 'settings.autoscript_path' if needed for server startup.
             2. Reliability:
@@ -107,6 +107,8 @@ class Agent:
             4. Decide whether or not to construct structured Experiments or just execute tools quickly.
             
             Available servers: MicroscopeServer.Central, MicroscopeServer.AS, MicroscopeServer.Ceos.
+
+            'settings' and the 'MicroscopeServer' Enum are pre-imported and available for use in your code execution environment.
             """,
             stream_outputs=True
         )
@@ -117,7 +119,8 @@ class Agent:
                 "MicroscopeServer": MicroscopeServer,
                 "tem": MicroscopeClientProxy(),
                 "pt": pt,
-                "np": np
+                "np": np,
+                "settings": settings,
             })
         except Exception:
             # Non-fatal: some executors may not support variable injection
