@@ -11,6 +11,7 @@ import numpy as np
 from app.config import settings
 from enum import Enum
 import pyTEMlib.probe_tools as pt
+import json
 
 # Global state for the client and server process
 CLIENT: Optional[object] = None # asyncroscopy.clients.notebook_client.NotebookClient
@@ -67,6 +68,26 @@ def start_server(mode: str = "mock", servers: Optional[list[MicroscopeServer]] =
     global SERVER_PROCESSES
     if servers is None:
         servers = [MicroscopeServer.Central, MicroscopeServer.AS, MicroscopeServer.Ceos]
+    # Allow callers to pass a single server or names as strings (e.g. "MicroscopeServer.AS" or "AS").
+    if not isinstance(servers, (list, tuple)):
+        servers = [servers]
+
+    def _resolve_server_item(item):
+        if isinstance(item, MicroscopeServer):
+            return item
+        if isinstance(item, str):
+            # Accept both "MicroscopeServer.AS" and "AS"
+            name = item.split('.')[-1]
+            try:
+                return MicroscopeServer[name]
+            except KeyError:
+                raise ValueError(f"Unknown MicroscopeServer: {item}")
+        raise TypeError("server entries must be MicroscopeServer or str")
+
+    try:
+        servers = [_resolve_server_item(s) for s in servers]
+    except Exception as e:
+        return f"Invalid server specification: {e}"
     
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     repo_path = os.path.join(base_dir, "external", "asyncroscopy")
@@ -507,7 +528,8 @@ def acquire_tableau(tab_type: str = "Fast", angle: float = 18.0) -> Any:
         return "Error: Client not connected."
     
     try:
-        return CLIENT.send_command("Ceos", "acquireTableau", {"tabType": tab_type, "angle": angle})
+        tableau_data = CLIENT.send_command("Ceos", "acquireTableau", {"tabType": tab_type, "angle": angle})
+        return json.dumps(tableau_data)
     except Exception as e:
         return f"Error acquiring tableau: {e}"
 
@@ -615,7 +637,7 @@ def submit_experiment(experiment_design: Dict[str, Any]) -> str:
 TOOLS.append(submit_experiment)
 
 @tool
-def get_probe(aberrations: dict, size_x: int = 128, size_y: int = 128, verbose: bool = True) -> dict:
+def get_probe(aberrations: dict, size_x: int = 128, size_y: int = 128, verbose: bool = True) -> np.ndarray:
     """
     Converts microscope-derived aberration coefficients into a 2D electron probe.
     
@@ -630,10 +652,79 @@ def get_probe(aberrations: dict, size_x: int = 128, size_y: int = 128, verbose: 
         verbose: If True, outputs calculation metadata such as wavelength.
 
     Returns:
-        A dictionary containing the 'probe' intensity map, the 'aperture' function, 
-        and the 'chi' phase aberration function.
+        A numpy array representing the 'probe' intensity map.
     """
 
-    return pt.get_probe(aberrations, size_x=size_x, size_y=size_y, verbose=verbose)
+    ab = convert_aberrations_A_to_C(aberrations)
+    ab['acceleration_voltage'] = 200e3
+    ab['convergence_angle'] = 30e-3
+    ab['FOV'] = 500
+    probe, A_k, chi  = pt.get_probe(ab, 256, 256, verbose= True)
+
+    return probe
+
+def convert_aberrations_A_to_C(ab: Dict) -> Dict:
+    """
+    Convert aberrations from A/B/S/D notation to Saxton Cnm notation.
+
+    Args:
+        ab : dict
+            aberration dict in A1, A2, C3, etc format
+
+    Returns:
+        dict with Cnm notation populated
+    """
+
+    out = dict(ab)  # copy everything
+
+    mapping = {
+
+        # defocus
+        "C1": ("C10",),
+
+        # 2nd order
+        "A1": ("C12a", "C12b"),
+
+        # 3rd order
+        "B2": ("C21a", "C21b"),
+        "A2": ("C23a", "C23b"),
+
+        # 4th order
+        "C3": ("C30",),
+        "S3": ("C32a", "C32b"),
+        "A3": ("C34a", "C34b"),
+
+        # 5th order
+        "D4": ("C41a", "C41b"),
+        "B4": ("C43a", "C43b"),
+        "A4": ("C45a", "C45b"),
+
+        # 6th order
+        "C5": ("C50",),
+        "A5": ("C56a", "C56b"),
+    }
+
+    for key, target in mapping.items():
+
+        if key not in ab:
+            continue
+
+        val = ab[key]
+
+        # symmetric terms
+        if len(target) == 1:
+
+            if isinstance(val, (list, tuple, np.ndarray)):
+                out[target[0]] = float(val[0]* 1e9)
+            else:
+                out[target[0]] = float(val* 1e9)
+
+        # angular terms
+        elif len(target) == 2:
+
+            out[target[0]] = float(val[0]* 1e9)
+            out[target[1]] = float(val[1]* 1e9)
+
+    return out
 
 TOOLS.append(get_probe)
