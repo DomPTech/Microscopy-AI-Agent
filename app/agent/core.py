@@ -113,6 +113,9 @@ class Agent:
             stream_outputs=True
         )
 
+        # Inject agent instance for workflow execution
+        microscopy.AGENT_INSTANCE = self.agent
+
         # Preload common classes into the Python executor context
         try:
             self.agent.python_executor.send_variables({
