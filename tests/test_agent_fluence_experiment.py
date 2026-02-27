@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -12,7 +13,9 @@ settings.instrument_host = "10.46.217.241"
 settings.instrument_port = 9095
 settings.autoscript_port = 9091
 
-start_server(mode="real")
+start_server(mode="mock")
+time.sleep(1)
+connect_client()
 
 prompt = '''
 Please run the following experiment on the real microscope (use real servers):

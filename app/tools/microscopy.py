@@ -589,7 +589,15 @@ class MicroscopeToolNode(WorkflowNode):
         try:
             state.history.append(f"Executing MicroscopeToolNode: {tool_name}")
             print(f"  -> Invoking '{tool_name}' with args {tool_args}")
-            result = tool_func(**tool_args)
+            # Support both keyword-arg style (dict) and positional-arg style (list)
+            if isinstance(tool_args, dict):
+                result = tool_func(**tool_args)
+            elif isinstance(tool_args, (list, tuple)):
+                result = tool_func(*tool_args)
+            else:
+                # Single scalar argument
+                result = tool_func(tool_args)
+
             print(f"  -> Result: {result}")
             state.data[self.name] = result
         except Exception as e:
@@ -670,12 +678,59 @@ NODE_REGISTRY = {
     "CodeNode": CodeNode,
 }
 
+# Simple in-process workflow state store to avoid fragile regex parsing
+# Keys are absolute yaml paths, values are dicts with keys: status ('created'|'executing'|'finished'),
+# created_at, updated_at, summary (optional)
+WORKFLOW_STATE = {}
+
+def register_workflow_created(yaml_path: str):
+    from datetime import datetime
+    yaml_path = os.path.abspath(yaml_path)
+    WORKFLOW_STATE[yaml_path] = {
+        "status": "created",
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "summary": None,
+    }
+
+def register_workflow_executing(yaml_path: str):
+    from datetime import datetime
+    yaml_path = os.path.abspath(yaml_path)
+    if yaml_path not in WORKFLOW_STATE:
+        register_workflow_created(yaml_path)
+    WORKFLOW_STATE[yaml_path]["status"] = "executing"
+    WORKFLOW_STATE[yaml_path]["updated_at"] = datetime.utcnow().isoformat()
+
+def register_workflow_finished(yaml_path: str, summary: str = None):
+    from datetime import datetime
+    yaml_path = os.path.abspath(yaml_path)
+    if yaml_path not in WORKFLOW_STATE:
+        register_workflow_created(yaml_path)
+    WORKFLOW_STATE[yaml_path]["status"] = "finished"
+    WORKFLOW_STATE[yaml_path]["updated_at"] = datetime.utcnow().isoformat()
+    WORKFLOW_STATE[yaml_path]["summary"] = summary
+
+def get_last_created_workflow() -> Optional[str]:
+    # Return the most recently created workflow path, or None
+    if not WORKFLOW_STATE:
+        return None
+    # sort by created_at
+    try:
+        items = sorted(WORKFLOW_STATE.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
+        return items[0][0]
+    except Exception:
+        # fallback
+        return next(iter(WORKFLOW_STATE.keys()))
+
+
 @tool
 def design_workflow(name: str, yaml_content: str) -> str:
     """
     Designs a new experimental workflow by parsing a YAML configuration,
     validating it, and saving it as an executable .yaml file and a .png diagram.
     The AI should output the YAML content as a string.
+    Use a CodeNode for any complex logic (like for/while loops), special imports,
+    or calculations that the agent needs to perform during execution.
     
     Args:
         name: Name of the workflow file (e.g., 'focus_optimization'). It will be saved as app/workflows/{name}.yaml
@@ -700,7 +755,13 @@ def design_workflow(name: str, yaml_content: str) -> str:
         # Save yaml
         with open(yaml_path, 'w') as f:
             f.write(yaml_content)
-            
+
+        # Register state so external callers (LLM bridge) can detect the created workflow
+        try:
+            register_workflow_created(yaml_path)
+        except Exception:
+            pass
+
         # Generate Graphviz chart
         dot = graphviz.Digraph(comment=template.name)
         dot.attr(rankdir='TB', splines='spline', nodesep='0.6', ranksep='0.8', bgcolor='#121212')
@@ -779,8 +840,21 @@ def execute_workflow(yaml_path: str) -> str:
         
         # Execute workflow
         print(f"\\n--- Initiating Workflow: {template.name} ---\\n")
+        # Mark executing
+        try:
+            register_workflow_executing(yaml_path)
+        except Exception:
+            pass
+
         final_state = executor.run(context={"agent": getattr(sys.modules[__name__], "AGENT_INSTANCE", None)})
-        
+
+        # Mark finished with summary
+        try:
+            summary = f"History: {final_state.history}; Errors: {final_state.errors}; Metrics: {final_state.metrics}"
+            register_workflow_finished(yaml_path, summary)
+        except Exception:
+            pass
+
         return f"Workflow {template.name} execution finished.\\nHistory: {final_state.history}\\nErrors: {final_state.errors}\\nMetrics: {final_state.metrics}"
     except Exception as e:
         return f"Failed to execute workflow: {str(e)}"

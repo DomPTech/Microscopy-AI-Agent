@@ -72,7 +72,7 @@ class Agent:
             model=self.model, 
             executor=SupervisedExecutor(additional_authorized_imports=[
                 "app.tools.microscopy", "app.config.*", 
-                "numpy", "time", "os", "scipy", "matplotlib", "skimage"
+                "numpy", "time", "os", "scipy", "json", "yaml"
             ]),
             instructions="""
             You are an expert microscopy AI assistant. 
@@ -132,33 +132,50 @@ class Agent:
         import os
         import re
 
-        def _generate_until_success(prompt_text: str) -> str:
-            current_prompt = prompt_text
-            while True:
-                print("\\nAgent is working on the workflow...")
-                output = str(self.agent.run(current_prompt)).strip()
-                print(f"\\nAgent Output:\\n{output}\\n")
-                
-                # Extract path ending in .yaml avoiding surrounding punctuation
-                match = re.search(r'([/\\w\\.-]+\\.yaml)', output)
-                if match:
-                    path = match.group(1).strip()
-                    if os.path.exists(path):
-                        return path
-                    else:
-                        print(f"Warning: Discovered path '{path}' does not exist on disk. Forcing retry.")
-                        current_prompt = f"The path you provided ({path}) does not exist. Did you successfully run `design_workflow`? Please try again and provide the correct absolute path."
-                else:
-                    print("Warning: Could not extract a valid .yaml path from output. Forcing retry.")
-                    current_prompt = "You did not provide a valid .yaml file path. You MUST use the `design_workflow` tool and output the resulting absolute path."
+        def _generate_until_success(prompt_text: str, max_attempts: int = 3):
+            """Run the agent to design a workflow and rely on the tools' explicit
+            workflow state store (in `app.tools.microscopy`) to detect the
+            created YAML path. This avoids brittle regex parsing of LLM output.
+
+            Returns: tuple(path_or_None, last_output)
+            """
+            last_output = ""
+            for attempt in range(1, max_attempts + 1):
+                print("\nAgent is working on the workflow...")
+                last_output = str(self.agent.run(prompt_text)).strip()
+                print(f"\nAgent Output:\n{last_output}\n")
+
+                # Prefer explicit state from the microscopy tools rather than parsing text
+                try:
+                    yaml_path = microscopy.get_last_created_workflow()
+                    if yaml_path and os.path.exists(yaml_path):
+                        return yaml_path, last_output
+                except Exception:
+                    pass
+
+                # If not found, give the model another chance with a clearer prompt
+                prompt_text = (
+                    "You did not create a workflow using the `design_workflow` tool. "
+                    "Please call `design_workflow(name, yaml_content)` and then return the absolute path of the saved YAML file."
+                )
+
+            # exhausted
+            return None, last_output
 
         init_prompt = (
             f"Please design a workflow for the following experimental task:\\n{query}\\n\\n"
             "You MUST use the `design_workflow` tool to define and save this workflow. Provide the absolute path of the saved yaml file as your final answer."
         )
         
-        parsed_yaml_path = _generate_until_success(init_prompt)
-        
+        parsed_yaml_path, last_output = _generate_until_success(init_prompt)
+
+        # If we failed to obtain a YAML path, gracefully return a short summary or error
+        if parsed_yaml_path is None:
+            if last_output and "Workflow" in last_output:
+                # If the agent produced a workflow execution summary, return it
+                return last_output
+            return f"Failed to design workflow after multiple attempts. Last agent output:\n{last_output}"
+
         while True:
             print(f"\\nProposed Workflow YAML: {parsed_yaml_path}")
             print("Options:")
