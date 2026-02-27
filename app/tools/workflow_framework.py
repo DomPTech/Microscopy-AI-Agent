@@ -23,7 +23,7 @@ class WorkflowNode(abc.ABC):
         self.params = kwargs
 
     @abc.abstractmethod
-    def execute(self, state: WorkflowState, agent: Optional[Any] = None) -> WorkflowState:
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
         """
         Execute the node's logic. Must return the updated state.
         """
@@ -76,16 +76,11 @@ class WorkflowExecutor:
 
         return sorted_nodes
 
-    def run(self, initial_state: Optional[WorkflowState] = None, agent: Optional[Any] = None) -> WorkflowState:
+    def run(self, initial_state: Optional[WorkflowState] = None, context: Optional[dict] = None) -> WorkflowState:
         state = initial_state or WorkflowState()
         state.history.append(f"Starting workflow: {self.template.name}")
-
-        if agent and hasattr(agent, "memory") and hasattr(agent.memory, "steps"):
-            from smolagents.memory import PlanningStep
-            plan = f"Executing workflow: {self.template.name}\\nDescription: {self.template.description}"
-            step = PlanningStep(model_input_messages=[], plan=plan)
-            agent.memory.steps.append(step)
-
+        
+        context = context or {}
 
         try:
             sorted_node_configs = self._topological_sort()
@@ -106,8 +101,12 @@ class WorkflowExecutor:
                 # Instantiate and run
                 node_class = self.node_registry[node_type]
                 node_instance = node_class(name=node_id, **node_params)
+                
+                print(f"\\n--- Executing Node: {node_id} ({node_type}) ---")
                 state.history.append(f"Executing node '{node_id}' of type '{node_type}'...")
-                state = node_instance.execute(state, agent=agent)
+                
+                # Execute the node
+                state = node_instance.execute(state, context=context)
                 
                 # Check if node deliberately raised error in state
                 if state.errors and state.errors[-1].startswith("FATAL"):

@@ -13,9 +13,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import torch
-from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool, PlanningStep, ActionStep
-from smolagents.agents import ActionOutput
-from smolagents.memory import FinalAnswerStep
+from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool
 from smolagents.models import ChatMessageStreamDelta
 from app.tools.microscopy import TOOLS, MicroscopeServer
 from app.utils.helpers import get_total_ram_gb
@@ -72,8 +70,6 @@ class Agent:
         self.agent = CodeAgent(
             tools=TOOLS, 
             model=self.model, 
-            planning_interval=5,
-            step_callbacks={PlanningStep: self.interrupt_after_plan},
             executor=SupervisedExecutor(additional_authorized_imports=[
                 "app.tools.microscopy", "app.config.*", 
                 "numpy", "time", "os", "scipy", "matplotlib", "skimage"
@@ -133,51 +129,67 @@ class Agent:
         """
         Process user input and return a response.
         """
-        response = self.agent.run(query)
-        return response
+        prompt = (
+            f"Please design a workflow for the following experimental task:\\n{query}\\n\\n"
+            "You MUST use the `design_workflow` tool to define and save this workflow. Provide the path of the saved yaml file as your final answer."
+        )
+        print("Agent is designing the workflow...")
+        yaml_path = str(self.agent.run(prompt)).strip()
+        print(f"\\nAgent Output: {yaml_path}\\n")
+        
+        while True:
+            print("Options:")
+            print("1. Accept workflow and execute")
+            print("2. Modify workflow")
+            print("3. Reject workflow and stop")
+            choice = input("Enter your choice (1/2/3): ").strip()
+            
+            if choice == '1':
+                # Try to extract yaml path if it returned a complex string
+                import re
+                match = re.search(r'([/\\w\\.-]+\\.yaml)', yaml_path)
+                if match:
+                    parsed_yaml_path = match.group(1)
+                else:
+                    parsed_yaml_path = input("Could not safely extract yaml path. Please enter the path to the .yaml file manually: ").strip()
+                break
+            elif choice == '2':
+                mod_query = input("Enter your modifications: ")
+                mod_prompt = f"Please modify the previously designed workflow as follows: {mod_query}\\nUse design_workflow to save it."
+                print("Agent is modifying the workflow...")
+                yaml_path = str(self.agent.run(mod_prompt)).strip()
+                print(f"\\nAgent Output: {yaml_path}\\n")
+            elif choice == '3':
+                return "Execution canceled by user."
+            else:
+                print("Invalid choice.")
+                
+        # Execute workflow
+        from app.tools.workflow_framework import WorkflowTemplate, WorkflowExecutor
+        from app.tools.microscopy import NODE_REGISTRY
+        import yaml
+        
+        try:
+            with open(parsed_yaml_path, 'r') as f:
+                parsed_template_yaml = yaml.safe_load(f)
+            template = WorkflowTemplate(**parsed_template_yaml)
+            executor = WorkflowExecutor(template, NODE_REGISTRY)
+            
+            print(f"\\n--- Initiating Workflow: {template.name} ---\\n")
+            
+            # Use context to pass the LLM in so CodeNodes can wake the Agent up.
+            final_state = executor.run(context={"agent": self.agent})
+            
+            return f"Workflow {template.name} execution finished.\\nHistory: {final_state.history}\\nErrors: {final_state.errors}\\nMetrics: {final_state.metrics}"
+        except Exception as e:
+            return f"Failed to execute workflow: {e}"
 
     def stream_chat(self, query: str):
         """
         Stream user input processing as a sequence of events.
         Yields dicts with keys: type ("delta"|"final") and content.
+        This wraps the chat logic into simplified delta streams for web interfaces, though it does not yet support interactive input gracefully.
         """
-        final_output = None
-        for event in self.agent.run(query, stream=True):
-            if isinstance(event, ChatMessageStreamDelta) and event.content:
-                yield {"type": "delta", "content": event.content}
-            elif isinstance(event, ActionOutput) and event.is_final_answer:
-                final_output = event.output
-            elif isinstance(event, FinalAnswerStep):
-                final_output = event.output
-
-        if final_output is not None:
-            yield {"type": "final", "content": str(final_output)}
-
-    def interrupt_after_plan(self, memory_step, agent):
-        """
-        An interrupt callback to stop the agent after the planning step.
-        """
-        if isinstance(memory_step, PlanningStep):
-            while True:
-                print("User choices: ")
-                print("1. Approve plan")
-                print("2. Modify plan")
-                print("3. Reject plan and stop execution")
-                choice = input("Enter your choice (1/2/3): ").strip()
-                if choice == '1':
-                    break
-                elif choice == '2':
-                    new_plan = input("Enter your modifications to the plan: ")
-                    if new_plan.strip():
-                        memory_step.plan = new_plan
-                        print("Plan updated. Continuing execution.")
-                    else:
-                        print("No modifications entered. Continuing with original plan.")
-                    break
-                elif choice == '3':
-                    print("Execution interrupted by user.")
-                    raise KeyboardInterrupt("Execution interrupted by user during planning.")
-                else:
-                    print("Invalid choice. Please enter 1, 2, or 3.")
-            return True
-        return False
+        yield {"type": "delta", "content": "Running interactive workflow loop (Not fully supported in pure streams yet)\\n"}
+        res = self.chat(query)
+        yield {"type": "final", "content": res}

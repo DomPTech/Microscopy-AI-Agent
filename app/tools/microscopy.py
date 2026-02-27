@@ -16,7 +16,6 @@ import json
 # Global state for the client and server process
 CLIENT: Optional[object] = None # asyncroscopy.clients.notebook_client.NotebookClient
 SERVER_PROCESSES: Dict[str, subprocess.Popen] = {}
-AGENT_INSTANCE: Optional[Any] = None # smolagents.CodeAgent instance for workflow integration
 
 def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
     """Wait for a port to become available (server listening)."""
@@ -576,93 +575,92 @@ import graphviz
 from app.tools.workflow_framework import WorkflowState, WorkflowNode, WorkflowTemplate, WorkflowExecutor
 
 class MicroscopeToolNode(WorkflowNode):
-    def execute(self, state: WorkflowState, agent: Optional[Any] = None) -> WorkflowState:
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
         tool_name = self.params.get("tool")
         tool_args = self.params.get("args", {})
         
         tool_func = next((t for t in TOOLS if getattr(t, "name", "") == tool_name), None)
         if not tool_func:
-            state.errors.append(f"FATAL: Tool {tool_name} not found.")
+            err = f"FATAL: Tool {tool_name} not found."
+            print(err)
+            state.errors.append(err)
             return state
             
         try:
             state.history.append(f"Executing MicroscopeToolNode: {tool_name}")
+            print(f"  -> Invoking '{tool_name}' with args {tool_args}")
             result = tool_func(**tool_args)
+            print(f"  -> Result: {result}")
             state.data[self.name] = result
-            
-            if agent and hasattr(agent, "memory") and hasattr(agent.memory, "steps"):
-                from smolagents.memory import ActionStep
-                step = ActionStep(model_input_messages=[], tool_calls=[], expected_output=f"Execute {tool_name}")
-                step.action_output = f"Result of {tool_name}: {result}"
-                agent.memory.steps.append(step)
         except Exception as e:
-            state.errors.append(f"FATAL: Error in {tool_name}: {e}")
+            err = f"FATAL: Error in {tool_name}: {e}"
+            print(err)
+            state.errors.append(err)
             
         return state
 
 class AIContextNode(WorkflowNode):
-    def execute(self, state: WorkflowState, agent: Optional[Any] = None) -> WorkflowState:
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
         query = self.params.get("query", "")
         # Real implementation would call an LLM here
         fake_context = f"Retrieved experimental context for '{query}': parameters should be tuned near 1000."
         state.context[self.name] = fake_context
         state.history.append(f"AI Context Node retrieved: {fake_context}")
-        
-        if agent and hasattr(agent, "memory") and hasattr(agent.memory, "steps"):
-            from smolagents.memory import ActionStep
-            step = ActionStep(model_input_messages=[], tool_calls=[], expected_output=f"Retrieve AI Context for query: {query}")
-            step.action_output = fake_context
-            agent.memory.steps.append(step)
-            
+        print(f"  -> Context retrieved: {fake_context}")
         return state
 
 class AIQualityNode(WorkflowNode):
-    def execute(self, state: WorkflowState, agent: Optional[Any] = None) -> WorkflowState:
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
         target = self.params.get("evaluate_node")
         if target in state.data:
             state.metrics[f"{self.name}_score"] = 0.95
             state.history.append(f"AI Quality Node evaluated {target} with score 0.95")
-            
-            if agent and hasattr(agent, "memory") and hasattr(agent.memory, "steps"):
-                from smolagents.memory import ActionStep
-                step = ActionStep(model_input_messages=[], tool_calls=[], expected_output=f"Evaluate AI Quality for {target}")
-                step.action_output = f"Score: 0.95"
-                agent.memory.steps.append(step)
+            print(f"  -> AI evaluated {target} successfully (Score: 0.95)")
         else:
-            state.errors.append(f"AI Quality Node could not find data for {target}")
+            err = f"AI Quality Node could not find data for {target}"
+            print(f"  -> {err}")
+            state.errors.append(err)
         return state
 
 class CodeNode(WorkflowNode):
-    def execute(self, state: WorkflowState, agent: Optional[Any] = None) -> WorkflowState:
-        code = self.params.get("code", "")
-        if agent and hasattr(agent, "python_executor"):
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
+        description = self.params.get("description", "")
+        agent = context.get("agent") if context else None
+        
+        if agent:
+            print(f"  -> [CodeNode '{self.name}'] Unpausing Agent to solve task: {description}")
             try:
-                state.history.append(f"Executing CodeNode via agent: {self.name}")
-                # We update the state internally using the python executor if needed
-                # By pre-injecting the state
-                try:
-                    agent.python_executor.send_variables({"state": state})
-                except Exception:
-                    pass
-                    
-                result = agent.python_executor(code)
-                state.data[self.name] = result
+                state.history.append(f"Executing CodeNode '{self.name}' via LLM Agent task")
+                # Inject state into agent's python executor so it can interact with the workflow
+                if hasattr(agent, "python_executor"):
+                    try:
+                        agent.python_executor.send_variables({"state": state})
+                    except Exception:
+                        pass
                 
-                if hasattr(agent, "memory") and hasattr(agent.memory, "steps"):
-                    from smolagents.memory import ActionStep
-                    step = ActionStep(model_input_messages=[], tool_calls=[], expected_output=f"Execute CodeNode {self.name}")
-                    step.action_output = f"CodeNode execution result:\\n{result}"
-                    agent.memory.steps.append(step)
+                # Command the agent to fulfill the description
+                prompt = (
+                    f"You are executing a Workflow task node named '{self.name}'.\\n"
+                    f"Your core task is: {description}\\n\\n"
+                    "The current workflow `state` object (type WorkflowState) has been injected into your python_executor local variables.\\n"
+                    "Read `state.data` or perform standard tool calls to satisfy the request.\\n"
+                    "If you determine new data, you can assign it like `state.data['new_key'] = val`.\\n"
+                    "Provide a brief summary of what you did when you are finished."
+                )
+                
+                # Unpause the agent!
+                result = agent.run(prompt)
+                
+                state.data[self.name] = result
+                print(f"  -> Agent completed CodeNode task. Response:\\n{result}")
             except Exception as e:
-                state.errors.append(f"FATAL: Code execution error in {self.name}: {e}")
+                err = f"FATAL: Code execution error in {self.name}: {e}"
+                print(err)
+                state.errors.append(err)
         else:
-            # Provide a restricted but useful local execution context
-            local_vars = {"state": state, "np": np, "time": time}
-            try:
-                state.history.append(f"Executing CodeNode: {self.name}")
-                exec(code, {}, local_vars)
-            except Exception as e:
-                state.errors.append(f"FATAL: Code execution error in {self.name}: {e}")
+            err = f"FATAL: CodeNode '{self.name}' requires the 'agent' in the context dictionary to execute."
+            print(err)
+            state.errors.append(err)
         return state
 
 NODE_REGISTRY = {
@@ -684,7 +682,8 @@ def design_workflow(name: str, yaml_content: str) -> str:
         yaml_content: The full YAML string defining the workflow. It must have 'name', 'description', 
                       'nodes' (list of dicts with 'id', 'type', 'params'), and 
                       'edges' (list of dicts with 'source' and 'target'). Types can be 'MicroscopeTool' 
-                      (params: 'tool', 'args'), 'AIContext' (params: 'query'), or 'AIQuality' (params: 'evaluate_node').
+                      (params: 'tool', 'args'), 'AIContext' (params: 'query'), 'AIQuality' (params: 'evaluate_node'),
+                      or 'CodeNode' (params: 'description').
     """
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     workflows_dir = os.path.join(base_dir, "workflows")
@@ -779,7 +778,8 @@ def execute_workflow(yaml_path: str) -> str:
         executor = WorkflowExecutor(template, NODE_REGISTRY)
         
         # Execute workflow
-        final_state = executor.run(agent=AGENT_INSTANCE)
+        print(f"\\n--- Initiating Workflow: {template.name} ---\\n")
+        final_state = executor.run(context={"agent": getattr(sys.modules[__name__], "AGENT_INSTANCE", None)})
         
         return f"Workflow {template.name} execution finished.\\nHistory: {final_state.history}\\nErrors: {final_state.errors}\\nMetrics: {final_state.metrics}"
     except Exception as e:
