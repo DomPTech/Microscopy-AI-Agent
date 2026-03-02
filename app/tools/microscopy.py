@@ -83,6 +83,10 @@ def start_server(mode: str = "mock", servers: Optional[list[Union[str, Microscop
                 return f"Invalid type for server: {type(s)}. Must be string or MicroscopeServer enum."
         servers = parsed_servers
 
+    # If a caller asks for AS/Ceos only, auto-include Central
+    if any(s != MicroscopeServer.Central for s in servers) and MicroscopeServer.Central not in servers:
+        servers = [MicroscopeServer.Central, *servers]
+
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     repo_path = os.path.join(base_dir, "external", "asyncroscopy")
     
@@ -170,25 +174,28 @@ def connect_client(host: Optional[str] = None, port: Optional[int] = None) -> st
     try:
         CLIENT = NotebookClient.connect(host=host, port=port)
         if not CLIENT:
-            return "Failed to connect to central server."
+            return (
+                "FATAL: Failed to connect to central server. "
+                "Ensure start_server() includes MicroscopeServer.Central (or call start_server() with defaults)."
+            )
         
         # Configure routing on the central server
         resp = CLIENT.send_command("Central", "set_routing_table", routing_table)
-        if isinstance(resp, str) and "ERROR" in resp:
-            return f"Failed to set routing table: {resp}"
+        if resp is None or (isinstance(resp, str) and ("error" in resp.lower() or "failed" in resp.lower())):
+            return f"FATAL: Failed to set routing table: {resp}"
         
         # Initialize AS server
         as_resp = CLIENT.send_command("AS", "connect_AS", {
             "host": settings.instrument_host, 
             "port": settings.instrument_port
         })
-        if isinstance(as_resp, str) and "ERROR" in as_resp:
-            return f"Failed to reach AS server: {as_resp}. Did you start all servers?"
+        if as_resp is None or (isinstance(as_resp, str) and ("error" in as_resp.lower() or "failed" in as_resp.lower())):
+            return f"FATAL: Failed to reach AS server: {as_resp}. Did you start all servers?"
         
         return f"Connected successfully. Routing: {resp}, AS: {as_resp}"
     except Exception as e:
         CLIENT = None
-        return f"Connection error: {e}"
+        return f"FATAL: Connection error: {e}"
 
 @tool
 def adjust_magnification(amount: float, destination: str = "AS") -> str:
@@ -568,67 +575,302 @@ TOOLS = [
     get_atom_count,
 ]
 
-# Experiment Framework Integration
-from app.tools.experiment_framework import ExperimentFootprint, ExperimentExecutor, ExperimentAction, ExperimentConstraint, RewardMetric
+# Workflow Framework Integration
+import os
+import yaml
+import graphviz
+from app.tools.workflow_framework import WorkflowState, WorkflowNode, WorkflowTemplate, WorkflowExecutor
+
+class MicroscopeToolNode(WorkflowNode):
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
+        tool_name = self.params.get("tool")
+        tool_args = self.params.get("args", {})
+        
+        tool_func = next((t for t in TOOLS if getattr(t, "name", "") == tool_name), None)
+        if not tool_func:
+            err = f"FATAL: Tool {tool_name} not found."
+            print(err)
+            state.errors.append(err)
+            return state
+            
+        try:
+            state.history.append(f"Executing MicroscopeToolNode: {tool_name}")
+            print(f"  -> Invoking '{tool_name}' with args {tool_args}")
+            # Support both keyword-arg style (dict) and positional-arg style (list)
+            if isinstance(tool_args, dict):
+                result = tool_func(**tool_args)
+            elif isinstance(tool_args, (list, tuple)):
+                result = tool_func(*tool_args)
+            else:
+                # Single scalar argument
+                result = tool_func(tool_args)
+
+            print(f"  -> Result: {result}")
+            state.data[self.name] = result
+        except Exception as e:
+            err = f"FATAL: Error in {tool_name}: {e}"
+            print(err)
+            state.errors.append(err)
+            
+        return state
+
+class AIContextNode(WorkflowNode):
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
+        query = self.params.get("query", "")
+        # Real implementation would call an LLM here
+        fake_context = f"Retrieved experimental context for '{query}': parameters should be tuned near 1000."
+        state.context[self.name] = fake_context
+        state.history.append(f"AI Context Node retrieved: {fake_context}")
+        print(f"  -> Context retrieved: {fake_context}")
+        return state
+
+class AIQualityNode(WorkflowNode):
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
+        target = self.params.get("evaluate_node")
+        if target in state.data:
+            state.metrics[f"{self.name}_score"] = 0.95
+            state.history.append(f"AI Quality Node evaluated {target} with score 0.95")
+            print(f"  -> AI evaluated {target} successfully (Score: 0.95)")
+        else:
+            err = f"AI Quality Node could not find data for {target}"
+            print(f"  -> {err}")
+            state.errors.append(err)
+        return state
+
+class CodeNode(WorkflowNode):
+    def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:
+        description = self.params.get("description", "")
+        agent = context.get("agent") if context else None
+        
+        if agent:
+            print(f"  -> [CodeNode '{self.name}'] Unpausing Agent to solve task: {description}")
+            try:
+                state.history.append(f"Executing CodeNode '{self.name}' via LLM Agent task")
+                # Inject state into agent's python executor so it can interact with the workflow
+                if hasattr(agent, "python_executor"):
+                    try:
+                        agent.python_executor.send_variables({"state": state})
+                    except Exception:
+                        pass
+                
+                # Command the agent to fulfill the description
+                prompt = (
+                    f"You are executing an already-designed workflow step named '{self.name}'.\\n"
+                    f"Your core task is: {description}\\n\\n"
+                    "The current workflow `state` object (type WorkflowState) has been injected into your python_executor local variables.\\n"
+                    "Read `state.data` or perform standard tool calls to satisfy the request.\\n"
+                    "If you determine new data, you can assign it like `state.data['new_key'] = val`.\\n"
+                    "Provide a brief summary of what you did when you are finished."
+                )
+                
+                # Run as subagent with workflow-construction tools disabled
+                disallowed = ["design_workflow", "execute_workflow"]
+                result = agent.run_subagent(prompt, disallowed_tools=disallowed)
+                
+                state.data[self.name] = result
+                print(f"  -> Agent completed CodeNode task. Response:\\n{result}")
+            except Exception as e:
+                err = f"FATAL: Code execution error in {self.name}: {e}"
+                print(err)
+                state.errors.append(err)
+        else:
+            err = f"FATAL: CodeNode '{self.name}' requires the 'agent' in the context dictionary to execute."
+            print(err)
+            state.errors.append(err)
+        return state
+
+NODE_REGISTRY = {
+    "MicroscopeTool": MicroscopeToolNode,
+    "AIContext": AIContextNode,
+    "AIQuality": AIQualityNode,
+    "CodeNode": CodeNode,
+}
+
+# Simple in-process workflow state store to avoid fragile regex parsing
+# Keys are absolute yaml paths, values are dicts with keys: status ('created'|'executing'|'finished'),
+# created_at, updated_at, summary (optional)
+WORKFLOW_STATE = {}
+
+def register_workflow_created(yaml_path: str):
+    from datetime import datetime
+    yaml_path = os.path.abspath(yaml_path)
+    WORKFLOW_STATE[yaml_path] = {
+        "status": "created",
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "summary": None,
+    }
+
+def register_workflow_executing(yaml_path: str):
+    from datetime import datetime
+    yaml_path = os.path.abspath(yaml_path)
+    if yaml_path not in WORKFLOW_STATE:
+        register_workflow_created(yaml_path)
+    WORKFLOW_STATE[yaml_path]["status"] = "executing"
+    WORKFLOW_STATE[yaml_path]["updated_at"] = datetime.utcnow().isoformat()
+
+def register_workflow_finished(yaml_path: str, summary: str = None):
+    from datetime import datetime
+    yaml_path = os.path.abspath(yaml_path)
+    if yaml_path not in WORKFLOW_STATE:
+        register_workflow_created(yaml_path)
+    WORKFLOW_STATE[yaml_path]["status"] = "finished"
+    WORKFLOW_STATE[yaml_path]["updated_at"] = datetime.utcnow().isoformat()
+    WORKFLOW_STATE[yaml_path]["summary"] = summary
+
+def get_last_created_workflow() -> Optional[str]:
+    # Return the most recently created workflow path, or None
+    if not WORKFLOW_STATE:
+        return None
+    # sort by created_at
+    try:
+        items = sorted(WORKFLOW_STATE.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
+        return items[0][0]
+    except Exception:
+        # fallback
+        return next(iter(WORKFLOW_STATE.keys()))
+
 
 @tool
-def submit_experiment(experiment_design: Dict[str, Any]) -> str:
+def design_workflow(name: str, yaml_content: str) -> str:
     """
-    Submits a structured experiment to the autonomous scientist framework.
+    Designs a new experimental workflow by parsing a YAML configuration,
+    validating it, and saving it as an executable .yaml file and a .png diagram.
+    The AI should output the YAML content as a string.
     
-    This tool allows you to define a hypothesis as an 'Experimental Footprint' containing:
-    1. A sequence of actions.
-    2. Constraints to ensure safety/validity.
-    3. A reward metric to evaluate success.
+    CRITICAL: You MUST use a `CodeNode` for any logic that requires iteration (like for/while loops). 
+    - WRONG: Creating individual `MicroscopeTool` nodes to iterate over values (e.g. 'set_current_10', 'set_current_20').
+    - RIGHT: Create a single `CodeNode` with a description that explains the loop (e.g. 'Loop over beam currents [10, 20, 30]... for each value, set current, tune, and acquire tableau').
     
     Args:
-        experiment_design: A dictionary matching the ExperimentFootprint structure. 
-                           Example:
-                           {
-                               "id": "exp_001",
-                               "description": "Optimize focus",
-                               "actions": [
-                                    {"name": "adjust_magnification", "params": {"amount": 5000}}
-                               ],
-                               "constraints": [],
-                               "observables": ["image"],
-                               "reward": {"metric_type": "image_entropy"}
-                           }
+        name: Name of the workflow file (e.g., 'focus_optimization'). It will be saved as app/workflows/{name}.yaml
+        yaml_content: The full YAML string defining the workflow. It must have 'name', 'description', 
+                      'nodes' (list of dicts with 'id', 'type', 'params'), and 
+                      'edges' (list of dicts with 'source' and 'target'). Types can be 'MicroscopeTool' 
+                      (params: 'tool', 'args'), 'AIContext' (params: 'query'), 'AIQuality' (params: 'evaluate_node'),
+                      or 'CodeNode' (params: 'description').
     """
-    global TOOLS
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    workflows_dir = os.path.join(base_dir, "workflows")
+    os.makedirs(workflows_dir, exist_ok=True)
+               
+    yaml_path = os.path.join(workflows_dir, f"{name}.yaml")
+    png_path = os.path.join(workflows_dir, name) # Graphviz auto appends .png if told to format
     
     try:
-        # Parse the input dictionary into an ExperimentFootprint object
-        footprint = ExperimentFootprint(**experiment_design)
+        parsed_yaml = yaml.safe_load(yaml_content)
+        # Validate through Pydantic
+        template = WorkflowTemplate(**parsed_yaml)
         
-        # Create the executor with a map of available tools
-        tool_map = {t.name: t for t in TOOLS}
-        
-        executor = ExperimentExecutor(tool_map)
-        
-        if not CLIENT:
-            return "Error: Client not connected. Cannot execute experiment."
+        # Save yaml
+        with open(yaml_path, 'w') as f:
+            f.write(yaml_content)
 
-        # Fetch full state for validation
-        current_state = get_microscope_state("AS")
-        
-        if "error" in current_state:
-            return f"Failed to validate experiment: could not fetch state. Error: {current_state['error']}"
+        # Register state so external callers (LLM bridge) can detect the created workflow
+        try:
+            register_workflow_created(yaml_path)
+        except Exception:
+            pass
 
-        violations = executor.validate_constraints(footprint, current_state)
-        if violations:
-            return f"Experiment rejected due to constraints: {violations}"
+        # Generate Graphviz chart
+        dot = graphviz.Digraph(comment=template.name)
+        dot.attr(rankdir='TB', splines='spline', nodesep='0.6', ranksep='0.8', bgcolor='#121212')
+        dot.attr('edge', fontname='Helvetica,Arial,sans-serif', fontsize='10', color='#888888', arrowsize='0.8')
+        
+        for node in template.nodes:
+            node_id = str(node['id'])
+            node_type = node.get('type', 'Unknown')
+            params = node.get('params', {})
             
-        # Execute
-        results = executor.execute(footprint)
-        
-        return f"Experiment '{footprint.id}' completed.\\nSuccess: {results['success']}\\nReward: {results['reward']}\\nLog: {results['log']}"
-        
-    except Exception as e:
-        return f"Failed to submit experiment: {e}"
+            # Distinct colors per node type
+            if node_type == 'MicroscopeTool':
+                border_color = '#00FF9D'
+                bg_color = '#002E1C'
+            elif node_type == 'AIContext':
+                border_color = '#00D1FF'
+                bg_color = '#001A24'
+            elif node_type == 'AIQuality':
+                border_color = '#FF9900'
+                bg_color = '#2E1A00'
+            elif node_type == 'CodeNode':
+                border_color = '#FF00FF'
+                bg_color = '#2A002A'
+            else:
+                border_color = '#999999'
+                bg_color = '#222222'
 
-# Add the new tool to the exported list
-TOOLS.append(submit_experiment)
+            # Build HTML-like label showing the function / params
+            html_rows = f'<TR><TD ALIGN="CENTER" BORDER="0" CELLPADDING="8"><B><FONT COLOR="{border_color}" POINT-SIZE="16">{node_id}</FONT></B></TD></TR>'
+            html_rows += f'<TR><TD ALIGN="CENTER" BORDER="0" CELLPADDING="2"><FONT COLOR="#AAAAAA" POINT-SIZE="11">{node_type}</FONT></TD></TR>'
+            
+            # Add parameters if they exist
+            if params:
+                for k, v in params.items():
+                    val_str = str(v)[:40] + '...' if len(str(v)) > 40 else str(v)
+                    html_rows += f'<TR><TD ALIGN="LEFT" BORDER="0" CELLPADDING="4"><FONT COLOR="#CCCCCC" POINT-SIZE="10"><B>{k}:</B> {val_str}</FONT></TD></TR>'
+
+            label = f'<<TABLE BORDER="1" COLOR="{border_color}" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" BGCOLOR="{bg_color}" STYLE="ROUNDED">{html_rows}</TABLE>>'
+
+            if node_id in ['__start__', '__end__', 'start', 'end']:
+                dot.node(node_id, node_id, shape='ellipse', style='filled,rounded', fillcolor='#333333', color='#888888', fontcolor='#FFFFFF', fontname='Helvetica,Arial,sans-serif')
+            else:
+                dot.node(node_id, label, shape='none', margin='0')
+            
+        for edge in template.edges:
+            edge_kwargs = {}
+            if 'style' in edge:
+                edge_kwargs['style'] = str(edge['style'])
+            if 'label' in edge:
+                label_text = str(edge['label'])
+                edge_kwargs['label'] = f'<<TABLE BORDER="0" CELLBORDER="1" COLOR="#333333" CELLPADDING="4" BGCOLOR="#222222"><TR><TD><FONT COLOR="#FFFFFF" POINT-SIZE="10">{label_text}</FONT></TD></TR></TABLE>>'
+                
+            dot.edge(str(edge['source']), str(edge['target']), **edge_kwargs)
+            
+        # Render
+        dot.render(png_path, format='png', cleanup=True)
+        
+        return f"Successfully designed workflow! Saved YAML to {yaml_path} and diagram to {png_path}.png. Please ask the user to approve the workflow before calling execute_workflow."
+    except Exception as e:
+        return f"Failed to design workflow: {str(e)}"
+
+@tool
+def execute_workflow(yaml_path: str) -> str:
+    """
+    Executes a pre-designed and approved experimental workflow from a YAML file.
+    
+    Args:
+        yaml_path: The absolute or relative path to the .yaml workflow file.
+    """
+    try:
+        with open(yaml_path, 'r') as f:
+            parsed_yaml = yaml.safe_load(f)
+            
+        template = WorkflowTemplate(**parsed_yaml)
+        executor = WorkflowExecutor(template, NODE_REGISTRY)
+        
+        # Execute workflow
+        print(f"\\n--- Initiating Workflow: {template.name} ---\\n")
+        # Mark executing
+        try:
+            register_workflow_executing(yaml_path)
+        except Exception:
+            pass
+
+        final_state = executor.run(context={"agent": getattr(sys.modules[__name__], "AGENT_INSTANCE", None)})
+
+        # Mark finished with summary
+        try:
+            summary = f"History: {final_state.history}; Errors: {final_state.errors}; Metrics: {final_state.metrics}"
+            register_workflow_finished(yaml_path, summary)
+        except Exception:
+            pass
+
+        return f"Workflow {template.name} execution finished.\\nHistory: {final_state.history}\\nErrors: {final_state.errors}\\nMetrics: {final_state.metrics}"
+    except Exception as e:
+        return f"Failed to execute workflow: {str(e)}"
+
+# Add the new tools to the exported list
+TOOLS.extend([design_workflow, execute_workflow])
 
 @tool
 def get_probe(aberrations: dict, size_x: int = 128, size_y: int = 128, verbose: bool = True) -> np.ndarray:

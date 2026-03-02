@@ -21,3 +21,6 @@ fastapi
 uvicorn
 python-multipart
 -e external/asyncroscopy
+pyyaml
+graphviz
+pydot

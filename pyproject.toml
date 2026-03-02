@@ -29,6 +29,9 @@ dependencies = [
     "uvicorn",
     "python-multipart",
     "asyncroscopy @ file://./external/asyncroscopy",
+    "pyyaml",
+    "graphviz",
+    "pydot",
 ]
 
 [tool.setuptools.packages.find]
