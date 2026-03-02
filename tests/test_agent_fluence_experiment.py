@@ -22,8 +22,7 @@ from app.utils.server_cli import show_interactive_server_commands
 show_interactive_server_commands()
 
 prompt = '''
-Please run the following experiment on the real microscope (use real servers):
-The AS server is already running, no need to start it. Only start CEOs and Central.
+Please run the following experiment:
 
 1) Calibrate screen current.
 2) For the following beam current values (pA): [10, 30, 50, 80, 100, 200, 500, 1000, 5000, 10000] (just do the first four)
@@ -39,5 +38,5 @@ The AS server is already running, no need to start it. Only start CEOs and Centr
 Return a short summary of actions and any saved file paths.
 '''
 
-agent = Agent(model_id="Qwen/Qwen2.5-Coder-14B-Instruct")
+agent = Agent(model_id="Qwen/Qwen2.5-32B-Instruct")
 print(agent.chat(prompt))

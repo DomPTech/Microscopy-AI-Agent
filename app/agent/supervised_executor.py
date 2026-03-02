@@ -1,4 +1,7 @@
+import ast
+
 from smolagents import LocalPythonExecutor
+from app.config import settings
 
 class SupervisedExecutor(LocalPythonExecutor):
     """
@@ -9,11 +12,48 @@ class SupervisedExecutor(LocalPythonExecutor):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Variables for user input requests
+
         self.user_prompt = "Please provide input: "
         self.confirmation_prompt = "Do you want to proceed? (y/n): "
-        # List of dangerous functions
-        self.dangerous_functions = ["submit_experiment"]
+
+        # Tools that require explicit approval before execution.
+        self.dangerous_tools = {
+            "set_beam_current",
+            "blank_beam",
+            "unblank_beam",
+            "place_beam",
+            "execute_workflow",
+        }
+
+    def _is_autorun_enabled(self) -> bool:
+        return settings.agent_autorun
+
+    def _get_called_tool_names(self, code_action: str) -> list[str]:
+        """
+        Return tool names called in the code snippet that are in the dangerous_tools list.
+        Only names present in this executor's static tools are considered.
+        """
+        static_tools = getattr(self, "static_tools", {}) or {}
+        tool_names = set(static_tools.keys())
+        if not tool_names:
+            return []
+
+        called = set()
+        try:
+            tree = ast.parse(code_action)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if isinstance(func, ast.Name):
+                        called.add(func.id)
+                    elif isinstance(func, ast.Attribute):
+                        called.add(func.attr)
+        except SyntaxError:
+            for name in tool_names:
+                if f"{name}(" in code_action:
+                    called.add(name)
+
+        return sorted(called & tool_names & self.dangerous_tools)
 
     def request_user_input(self, prompt=None):
         """
@@ -28,7 +68,13 @@ class SupervisedExecutor(LocalPythonExecutor):
         """
         prompt = prompt or self.confirmation_prompt
         while True:
-            response = input(prompt).strip().lower()
+            try:
+                response = input(prompt).strip().lower()
+            except EOFError:
+                # Non-interactive environment: fail closed.
+                print("No interactive input available. Denying execution by default.")
+                return False
+
             if response in ['y', 'yes']:
                 return True
             elif response in ['n', 'no']:
@@ -38,12 +84,15 @@ class SupervisedExecutor(LocalPythonExecutor):
 
     def __call__(self, code_action):
         """
-        Execute the code action, but prompt the user if a dangerous function is detected.
+        Execute code actions with per-tool approval, unless autorun is enabled.
         """
-        for func in self.dangerous_functions:
-            if func in code_action:
-                print(f"The agent is trying to call this function: {func}")
-                if not self.request_confirmation("Do you want to proceed with this action? (y/n): "):
-                    print("Execution aborted by user.")
-                    return None
+        if not self._is_autorun_enabled():
+            called_tools = self._get_called_tool_names(code_action)
+            for func in called_tools:
+                print(f"The agent is trying to call this tool: {func}")
+                if not self.request_confirmation(f"Approve tool call '{func}'? (y/n): "):
+                    msg = f"Execution aborted by user. Tool call '{func}' was not approved."
+                    print(msg)
+                    return msg
+
         return super().__call__(code_action)

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Ensure project root is on sys.path for reliable imports
 _PROJECT_ROOT = None
@@ -25,6 +26,65 @@ except ImportError:
 import numpy as np
 from app.tools import microscopy
 from app.config import settings
+
+def _should_generate_workflow(query: str) -> bool:
+    """
+    Returns True for complex, multi-step experimental requests, false otherwise.
+    """
+    import re
+
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+
+    # Explicit user preference
+    if any(phrase in q for phrase in [
+        "no workflow",
+        "without workflow",
+        "don't use workflow",
+        "do not use workflow",
+        "skip workflow",
+    ]):
+        return False
+
+    if "workflow" in q:
+        return True
+
+    # Strong indicators of larger experiment
+    complex_markers = [
+        "experiment",
+        "protocol",
+        "multi-step",
+        "multistep",
+        "optimiz",
+        "calibration",
+        "sweep",
+        "for each",
+        "iterate",
+        "loop",
+        "parameter scan",
+        "across values",
+        "until",
+    ]
+    if any(marker in q for marker in complex_markers):
+        return True
+
+    # Sequential language
+    sequence_markers = [" then ", " followed by ", " after ", " before ", " while "]
+    sequence_hits = sum(1 for marker in sequence_markers if marker in f" {q} ")
+    if sequence_hits >= 1:
+        return True
+
+    # If several distinct action verbs appear, treat as complex
+    action_verbs = [
+        "start", "connect", "set", "adjust", "move", "place", "blank", "unblank",
+        "capture", "acquire", "calibrate", "tune", "measure", "analyze", "optimize",
+    ]
+    action_count = sum(1 for verb in action_verbs if re.search(rf"\b{re.escape(verb)}\b", q))
+    if action_count >= 3:
+        return True
+
+    return False
 
 class MicroscopeClientProxy:
     """Proxy to forward calls to the active global CLIENT instance."""
@@ -63,7 +123,7 @@ class Agent:
             model_kwargs={
                 "low_cpu_mem_usage": low_cpu_mem_usage,
                 "use_cache": True,
-                "load_in_8bit": load_in_8bit,
+                "load_in_4bit": True,
             }
         )
         # Full tool suite for the microscopy agent
@@ -87,10 +147,17 @@ class Agent:
             1. Use 'settings' for configuration:
                - Use 'settings.server_host' and 'settings.server_port' for connections.
                - Use 'settings.autoscript_path' if needed for server startup.
-            2. **Iterative Tasks & Loops (CRITICAL)**: When designing workflows with `design_workflow`, you MUST NOT create individual nodes for tasks that belong in a loop. Instead, use a single `CodeNode` to handle the entire iteration.
+                2. Reliability and truthfulness are mandatory:
+                    - Never claim success unless tool outputs explicitly confirm success.
+                    - If any tool output contains failure indicators (e.g. "error", "failed", "could not", "exception", "timeout"), treat the task as failed.
+                    - When a step fails, report the failure clearly and include the failing step + output.
+                    - Prefer recovery attempts (fix config / start missing services / retry once) before giving up.
+                    - For image capture tasks, verify an output artifact/path is returned before claiming completion.
+            3. **Iterative Tasks & Loops (CRITICAL)**: When designing workflows with `design_workflow`, you MUST NOT create individual nodes for tasks that belong in a loop. Instead, use a single `CodeNode` to handle the entire iteration.
                - **WRONG**: Creating `node_current_10`, `node_current_20`, `node_current_30` etc.
                - **RIGHT**: Creating a single `CodeNode` with description: "Loop over beam current values [10, 20, 30]... for each value, set current, tune, and acquire."
                - This keeps the workflow graph clean and allows the Agent to use higher-level logic (like Python loops) during execution.
+                4. **CodeNode execution mode (CRITICAL)**: If a prompt says you are executing an already-designed workflow step/task node, do not design a new workflow and do not suggest node structures. Execute the requested operations directly using tools and/or python_executor.
             
             'settings' and the 'MicroscopeServer' Enum are pre-imported and available for use in your code execution environment.
             """,
@@ -113,12 +180,77 @@ class Agent:
             # Non-fatal: some executors may not support variable injection
             pass
 
+    def run_subagent(self, prompt: str, allowed_tools: Optional[list[str]] = None, disallowed_tools: Optional[list[str]] = None) -> str:
+        """
+        Run a focused subagent task with optional tool filtering.
+        Uses fresh agent with filtered tools for execution.
+        
+        Args:
+            prompt: The task prompt for the agent.
+            allowed_tools: If provided, only these tools are available (whitelist).
+                          If None, all tools are available unless disallowed_tools is set.
+            disallowed_tools: Tools to explicitly remove (blacklist).
+                             Only used if allowed_tools is None.
+        
+        Returns:
+            The agent's response as a string.
+        """
+        # Determine which tools to use
+        if allowed_tools is not None:
+            filtered_tools = [t for t in TOOLS if getattr(t, "name", None) in allowed_tools]
+        elif disallowed_tools is not None:
+            disallowed_set = set(disallowed_tools)
+            filtered_tools = [t for t in TOOLS if getattr(t, "name", None) not in disallowed_set]
+        else:
+            filtered_tools = TOOLS
+        
+        subagent = CodeAgent(
+            tools=filtered_tools,
+            model=self.model,
+            executor=SupervisedExecutor(additional_authorized_imports=[
+                "app.tools.microscopy", "app.config.*",
+                "numpy", "time", "os", "scipy", "json", "yaml"
+            ]),
+            instructions=self.agent.instructions,
+            stream_outputs=True
+        )
+        
+        try:
+            subagent.python_executor.send_variables({
+                "MicroscopeServer": MicroscopeServer,
+                "tem": MicroscopeClientProxy(),
+                "pt": pt,
+                "np": np,
+                "settings": settings,
+            })
+        except Exception:
+            pass
+        
+        return str(subagent.run(prompt)).strip()
+
     def chat(self, query: str) -> str:
         """
         Process user input and return a response.
         """
         import os
-        import re
+
+        if not _should_generate_workflow(query):
+            print("\nHandling request as a direct task (no workflow generation).")
+            try:
+                direct_prompt = (
+                    "Execute the user's request using tools when needed.\\n"
+                    "Critical reliability rules:\\n"
+                    "- Never claim success if any step output indicates error/failure/could-not/exception/timeout.\\n"
+                    "- If a step fails, attempt one reasonable recovery and retry.\\n"
+                    "- Return a concise final result that is either:\\n"
+                    "  * SUCCESS: <what was done and concrete evidence>\\n"
+                    "  * FAILED: <what failed, where, and why>\\n"
+                    f"User request: {query}"
+                )
+                direct_response = str(self.agent.run(direct_prompt)).strip()
+                return direct_response
+            except Exception as e:
+                return f"Failed to execute task: {e}"
 
         def _generate_until_success(prompt_text: str, max_attempts: int = 3):
             """Run the agent to design a workflow and rely on the tools' explicit
@@ -196,8 +328,8 @@ class Agent:
             
             print(f"\\n--- Initiating Workflow: {template.name} ---\\n")
             
-            # Use context to pass the LLM in so CodeNodes can wake the Agent up.
-            final_state = executor.run(context={"agent": self.agent})
+            # Use context to pass the Agent wrapper so CodeNodes can call run_subagent
+            final_state = executor.run(context={"agent": self})
             
             print("\\nAgent is generating a summary of the execution...")
             summary_prompt = (

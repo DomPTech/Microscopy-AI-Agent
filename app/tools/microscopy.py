@@ -83,6 +83,10 @@ def start_server(mode: str = "mock", servers: Optional[list[Union[str, Microscop
                 return f"Invalid type for server: {type(s)}. Must be string or MicroscopeServer enum."
         servers = parsed_servers
 
+    # If a caller asks for AS/Ceos only, auto-include Central
+    if any(s != MicroscopeServer.Central for s in servers) and MicroscopeServer.Central not in servers:
+        servers = [MicroscopeServer.Central, *servers]
+
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     repo_path = os.path.join(base_dir, "external", "asyncroscopy")
     
@@ -170,12 +174,15 @@ def connect_client(host: Optional[str] = None, port: Optional[int] = None) -> st
     try:
         CLIENT = NotebookClient.connect(host=host, port=port)
         if not CLIENT:
-            return "Failed to connect to central server."
+            return (
+                "FATAL: Failed to connect to central server. "
+                "Ensure start_server() includes MicroscopeServer.Central (or call start_server() with defaults)."
+            )
         
         # Configure routing on the central server
         resp = CLIENT.send_command("Central", "set_routing_table", routing_table)
         if resp is None or (isinstance(resp, str) and ("error" in resp.lower() or "failed" in resp.lower())):
-            return f"Failed to set routing table: {resp}"
+            return f"FATAL: Failed to set routing table: {resp}"
         
         # Initialize AS server
         as_resp = CLIENT.send_command("AS", "connect_AS", {
@@ -183,12 +190,12 @@ def connect_client(host: Optional[str] = None, port: Optional[int] = None) -> st
             "port": settings.instrument_port
         })
         if as_resp is None or (isinstance(as_resp, str) and ("error" in as_resp.lower() or "failed" in as_resp.lower())):
-            return f"Failed to reach AS server: {as_resp}. Did you start all servers?"
+            return f"FATAL: Failed to reach AS server: {as_resp}. Did you start all servers?"
         
         return f"Connected successfully. Routing: {resp}, AS: {as_resp}"
     except Exception as e:
         CLIENT = None
-        return f"Connection error: {e}"
+        return f"FATAL: Connection error: {e}"
 
 @tool
 def adjust_magnification(amount: float, destination: str = "AS") -> str:
@@ -648,7 +655,7 @@ class CodeNode(WorkflowNode):
                 
                 # Command the agent to fulfill the description
                 prompt = (
-                    f"You are executing a Workflow task node named '{self.name}'.\\n"
+                    f"You are executing an already-designed workflow step named '{self.name}'.\\n"
                     f"Your core task is: {description}\\n\\n"
                     "The current workflow `state` object (type WorkflowState) has been injected into your python_executor local variables.\\n"
                     "Read `state.data` or perform standard tool calls to satisfy the request.\\n"
@@ -656,8 +663,9 @@ class CodeNode(WorkflowNode):
                     "Provide a brief summary of what you did when you are finished."
                 )
                 
-                # Unpause the agent!
-                result = agent.run(prompt)
+                # Run as subagent with workflow-construction tools disabled
+                disallowed = ["design_workflow", "execute_workflow"]
+                result = agent.run_subagent(prompt, disallowed_tools=disallowed)
                 
                 state.data[self.name] = result
                 print(f"  -> Agent completed CodeNode task. Response:\\n{result}")

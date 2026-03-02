@@ -41,6 +41,9 @@ class MicroscopeSettings(BaseSettings):
     # Simulation Mode
     sim_mode: bool = Field(False, description="Enable dry-run/simulator mode by default")
 
+    # Agent Approval Control
+    agent_autorun: bool = Field(False, description="If True, allow agent to execute tools without requiring manual approval. If False, each tool call requires user confirmation.")
+
     # Other stuff
     hf_cache_dir: str = Field("~/.cache/huggingface", description="To configure where Huggingface will locally store data, models, etc.")
 
