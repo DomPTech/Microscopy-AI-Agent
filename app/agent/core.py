@@ -1,6 +1,10 @@
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, Union
+from transformers import TextIteratorStreamer
+from threading import Thread
+import yaml
+import numpy as np
 
 # Ensure project root is on sys.path for reliable imports
 _PROJECT_ROOT = None
@@ -15,18 +19,24 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import torch
 from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool
-from smolagents.models import ChatMessageStreamDelta
-from app.tools.microscopy import TOOLS, MicroscopeServer
+from smolagents.models import ChatMessageStreamDelta, ChatMessage
+
+from app.tools.microscopy import TOOLS, NODE_REGISTRY, MicroscopeServer, WorkflowTemplate, WorkflowExecutor
 from app.utils.helpers import get_total_ram_gb
 from app.utils.memory import SessionMemory
 from app.agent.supervised_executor import SupervisedExecutor
-try:
-    import pyTEMlib.probe_tools as pt
-except ImportError:
-    pt = None
-import numpy as np
+
+import pyTEMlib.probe_tools as pt
+
 from app.tools import microscopy
 from app.config import settings
+
+
+def _safe_to_string(value: object) -> str:
+    try:
+        return str(value)
+    except Exception as exc:
+        return f"<unprintable {type(value).__name__}: {exc}>"
 
 def _should_generate_workflow(query: str) -> bool:
     """
@@ -235,118 +245,68 @@ class Agent:
         
         return str(subagent.run(prompt)).strip()
 
-    def chat(self, query: str) -> str:
-        """
-        Process user input and return a response.
-        """
-        import os
+    @staticmethod
+    def _emit(emit: Optional[Callable[[str], None]], message: str) -> None:
+        if emit and message:
+            emit(message)
 
-        if not _should_generate_workflow(query):
-            print("\nHandling request as a direct task (no workflow generation).")
-            try:
-                direct_prompt = (
-                    "Execute the user's request using tools when needed.\\n"
-                    "Critical reliability rules:\\n"
-                    "- Never claim success if any step output indicates error/failure/could-not/exception/timeout.\\n"
-                    "- If a step fails, attempt one reasonable recovery and retry.\\n"
-                    "- Return a concise final result that is either:\\n"
-                    "  * SUCCESS: <what was done and concrete evidence>\\n"
-                    "  * FAILED: <what failed, where, and why>\\n"
-                    f"User request: {query}"
-                )
-                direct_response = str(self.agent.run(direct_prompt)).strip()
-                return direct_response
-            except Exception as e:
-                return f"Failed to execute task: {e}"
-
-        def _generate_until_success(prompt_text: str, max_attempts: int = 3):
-            """Run the agent to design a workflow and rely on the tools' explicit
-            workflow state store (in `app.tools.microscopy`) to detect the
-            created YAML path. This avoids brittle regex parsing of LLM output.
-
-            Returns: tuple(path_or_None, last_output)
-            """
-            last_output = ""
-            for attempt in range(1, max_attempts + 1):
-                print("\nAgent is working on the workflow...")
-                last_output = str(self.agent.run(prompt_text)).strip()
-                print(f"\nAgent Output:\n{last_output}\n")
-
-                # Prefer explicit state from the microscopy tools rather than parsing text
-                try:
-                    yaml_path = microscopy.get_last_created_workflow()
-                    if yaml_path and os.path.exists(yaml_path):
-                        return yaml_path, last_output
-                except Exception:
-                    pass
-
-                # If not found, give the model another chance with a clearer prompt
-                prompt_text = (
-                    "You did not create a workflow using the `design_workflow` tool. "
-                    "Please call `design_workflow(name, yaml_content)` and then return the absolute path of the saved YAML file."
-                )
-
-            # exhausted
-            return None, last_output
-
-        init_prompt = (
-            f"Please design a workflow for the following experimental task:\\n{query}\\n\\n"
-            "You MUST use the `design_workflow` tool to define and save this workflow. Provide the absolute path of the saved yaml file as your final answer."
+    def _run_direct_task(self, query: str) -> str:
+        direct_prompt = (
+            "Execute the user's request using tools when needed.\\n"
+            "Critical reliability rules:\\n"
+            "- Never claim success if any step output indicates error/failure/could-not/exception/timeout.\\n"
+            "- If a step fails, attempt one reasonable recovery and retry.\\n"
+            "- Return a concise final result that is either:\\n"
+            "  * SUCCESS: <what was done and concrete evidence>\\n"
+            "  * FAILED: <what failed, where, and why>\\n"
+            f"User request: {query}"
         )
-        
-        parsed_yaml_path, last_output = _generate_until_success(init_prompt)
+        return str(self.agent.run(direct_prompt)).strip()
 
-        # If we failed to obtain a YAML path, gracefully return a short summary or error
-        if parsed_yaml_path is None:
-            if last_output and "Workflow" in last_output:
-                # If the agent produced a workflow execution summary, return it
-                return last_output
-            return f"Failed to design workflow after multiple attempts. Last agent output:\n{last_output}"
+    def _generate_workflow_until_success(
+        self,
+        prompt_text: str,
+        max_attempts: int = 3,
+        emit: Optional[Callable[[str], None]] = None,
+    ) -> tuple[Optional[str], str]:
+        """Run the agent to design a workflow and detect the created YAML path via tool state."""
+        last_output = ""
+        for _ in range(max_attempts):
+            self._emit(emit, "\nAgent is working on the workflow...\n")
+            last_output = str(self.agent.run(prompt_text)).strip()
+            self._emit(emit, f"\nAgent Output:\n{last_output}\n")
 
-        while True:
-            print(f"\\nProposed Workflow YAML: {parsed_yaml_path}")
-            print("Options:")
-            print("1. Accept workflow and execute")
-            print("2. Modify workflow")
-            print("3. Reject workflow and stop")
-            choice = input("Enter your choice (1/2/3): ").strip()
-            
-            if choice == '1':
-                break
-            elif choice == '2':
-                mod_query = input("Enter your modifications: ")
-                mod_prompt = f"Please modify the previously designed workflow as follows: {mod_query}\\nUse `design_workflow` to save it and return the updated absolute path."
-                parsed_yaml_path, _ = _generate_until_success(mod_prompt)
-            elif choice == '3':
-                return "Execution canceled by user."
-            else:
-                print("Invalid choice.")
-                
-        # Execute workflow
-        from app.tools.workflow_framework import WorkflowTemplate, WorkflowExecutor
-        from app.tools.microscopy import NODE_REGISTRY
-        import yaml
-        
+            try:
+                yaml_path = microscopy.get_last_created_workflow()
+                if yaml_path and Path(yaml_path).exists():
+                    return yaml_path, last_output
+            except Exception:
+                pass
+
+            prompt_text = (
+                "You did not create a workflow using the `design_workflow` tool. "
+                "Please call `design_workflow(name, yaml_content)` and then return the absolute path of the saved YAML file."
+            )
+
+        return None, last_output
+
+    def _execute_workflow(self, parsed_yaml_path: str, emit: Optional[Callable[[str], None]] = None) -> str:
         try:
             with open(parsed_yaml_path, 'r') as f:
                 parsed_template_yaml = yaml.safe_load(f)
             template = WorkflowTemplate(**parsed_template_yaml)
             executor = WorkflowExecutor(template, NODE_REGISTRY)
-            
-            # Save workflow YAML and PNG to memory BEFORE execution starts
+
             try:
                 png_path = Path(parsed_yaml_path).parent / (Path(parsed_yaml_path).stem + ".png")
                 png_path_str = str(png_path) if png_path.exists() else None
                 self.memory.save_workflow(parsed_yaml_path, png_path_str)
             except Exception as e:
-                print(f"[Agent] Warning: Failed to save workflow files: {e}")
-            
-            print(f"\\n--- Initiating Workflow: {template.name} ---\\n")
-            
-            # Use context to pass the Agent wrapper so CodeNodes can call run_subagent
+                self._emit(emit, f"[Agent] Warning: Failed to save workflow files: {e}\n")
+
+            self._emit(emit, f"\n--- Initiating Workflow: {template.name} ---\n\n")
             final_state = executor.run(context={"agent": self})
-            
-            # Save execution steps AFTER workflow completes
+
             try:
                 self.memory.save_execution_steps(
                     history=final_state.history,
@@ -355,29 +315,192 @@ class Agent:
                     summary=""
                 )
             except Exception as e:
-                print(f"[Agent] Warning: Failed to save execution steps: {e}")
-            
-            print("\\nAgent is generating a summary of the execution...")
+                self._emit(emit, f"[Agent] Warning: Failed to save execution steps: {e}\n")
+
+            self._emit(emit, "\nAgent is generating a summary of the execution...\n")
             summary_prompt = (
                 f"The workflow '{template.name}' has finished executing.\\n"
                 f"State Data: {final_state.data}\\n"
                 f"History: {final_state.history}\\n"
                 f"Errors: {final_state.errors}\\n"
                 f"Metrics: {final_state.metrics}\\n"
-                "Please provide a brief, user-friendly summary of what was accomplished."
+                "Please provide a user-friendly summary of what was accomplished."
             )
-            summary = str(self.agent.run(summary_prompt)).strip()
-            
-            return f"Workflow {template.name} execution finished.\\n\\nSummary:\\n{summary}\\n\\nHistory: {final_state.history}\\nErrors: {final_state.errors}\\nMetrics: {final_state.metrics}"
+
+            full_summary = ""
+            for item in self.generate(summary_prompt):
+                if isinstance(item, tuple) and item[0] == "final":
+                    full_summary = item[1]
+                elif isinstance(item, str):
+                    full_summary += item
+                    self._emit(emit, item)
+
+            history_text = _safe_to_string(final_state.history)
+            errors_text = _safe_to_string(final_state.errors)
+            metrics_text = _safe_to_string(final_state.metrics)
+            return (
+                f"Workflow {template.name} execution finished.\\n\\n"
+                f"Summary:\\n{full_summary}\\n\\n"
+                f"History: {history_text}\\n"
+                f"Errors: {errors_text}\\n"
+                f"Metrics: {metrics_text}"
+            )
         except Exception as e:
             return f"Failed to execute workflow: {e}"
+
+    def _run_chat(self, query: str, emit: Optional[Callable[[str], None]] = None, interactive_approval: bool = True) -> str:
+        if not _should_generate_workflow(query):
+            self._emit(emit, "\nHandling request as a direct task (no workflow generation).\n")
+            try:
+                return self._run_direct_task(query)
+            except Exception as e:
+                return f"Failed to execute task: {e}"
+
+        init_prompt = (
+            f"Please design a workflow for the following experimental task:\\n{query}\\n\\n"
+            "You MUST use the `design_workflow` tool to define and save this workflow. Provide the absolute path of the saved yaml file as your final answer."
+        )
+        parsed_yaml_path, last_output = self._generate_workflow_until_success(init_prompt, emit=emit)
+
+        if parsed_yaml_path is None:
+            if last_output and "Workflow" in last_output:
+                return last_output
+            return f"Failed to design workflow after multiple attempts. Last agent output:\n{last_output}"
+
+        if interactive_approval:
+            while True:
+                self._emit(emit, f"\nProposed Workflow YAML: {parsed_yaml_path}\n")
+                self._emit(emit, "Options:\n")
+                self._emit(emit, "1. Accept workflow and execute\n")
+                self._emit(emit, "2. Modify workflow\n")
+                self._emit(emit, "3. Reject workflow and stop\n")
+                choice = input("Enter your choice (1/2/3): ").strip()
+
+                if choice == '1':
+                    break
+                if choice == '2':
+                    mod_query = input("Enter your modifications: ")
+                    mod_prompt = (
+                        f"Please modify the previously designed workflow as follows: {mod_query}\\n"
+                        "Use `design_workflow` to save it and return the updated absolute path."
+                    )
+                    parsed_yaml_path, _ = self._generate_workflow_until_success(mod_prompt, emit=emit)
+                    if parsed_yaml_path is None:
+                        return "Failed to modify workflow after multiple attempts."
+                    continue
+                if choice == '3':
+                    return "Execution canceled by user."
+                self._emit(emit, "Invalid choice.\n")
+        else:
+            self._emit(emit, f"\nProposed Workflow YAML: {parsed_yaml_path}\n")
+            self._emit(emit, "Auto-accepting workflow in non-interactive stream mode.\n")
+
+        return self._execute_workflow(parsed_yaml_path, emit=emit)
+
+    def chat(self, query: str) -> str:
+        """
+        Process user input and return a response.
+        """
+        return self._run_chat(
+            query,
+            emit=lambda message: print(message, end="", flush=True),
+            interactive_approval=True,
+        )
 
     def stream_chat(self, query: str):
         """
         Stream user input processing as a sequence of events.
         Yields dicts with keys: type ("delta"|"final") and content.
-        This wraps the chat logic into simplified delta streams for web interfaces, though it does not yet support interactive input gracefully.
+        Uses the same internal execution path as chat(), but auto-accepts workflow
+        approval in non-interactive contexts.
         """
-        yield {"type": "delta", "content": "Running interactive workflow loop (Not fully supported in pure streams yet)\\n"}
-        res = self.chat(query)
+        deltas: list[str] = []
+        res = self._run_chat(
+            query,
+            emit=deltas.append,
+            interactive_approval=False,
+        )
+        for delta in deltas:
+            yield {"type": "delta", "content": delta}
         yield {"type": "final", "content": res}
+    
+    def generate(self, query: str):
+        """
+        Streams response to a query using the underlying model's generate method
+        Finally yields a tuple ("final", complete_response).
+        """
+        
+        try:
+            message = ChatMessage(role="user", content=query)
+            
+            tokenizer = self.model.tokenizer
+            prompt_dict = tokenizer.apply_chat_template(
+                [message],
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True
+            )
+            input_ids = prompt_dict["input_ids"].to(self.model.model.device)
+            
+            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+            
+            # Run generation in a thread
+            generation_thread = Thread(
+                target=self.model.model.generate,
+                kwargs={
+                    "input_ids": input_ids,
+                    "max_new_tokens": 1024,
+                    "streamer": streamer,
+                    "do_sample": True,
+                    "top_p": 0.9,
+                }
+            )
+            generation_thread.start()
+            
+            # Collect full text while yielding chunks
+            full_text = ""
+            for chunk in streamer:
+                if isinstance(chunk, list):
+                    chunk = "".join(str(x) for x in chunk)
+                elif not isinstance(chunk, str):
+                    chunk = str(chunk)
+                
+                full_text += chunk
+                if chunk.strip():
+                    yield chunk
+            
+            generation_thread.join()
+            
+            yield ("final", full_text.strip())
+            
+        except Exception as e:
+            error_msg = f"[Warning] Failed to generate response: {e}"
+            yield ("error", error_msg)
+
+def _extract_generated_text(output: Union[str, ChatMessage]) -> str:
+    """
+    Extract plain text from model.generate() output.
+    """
+    if output is None:
+        return ""
+    
+    if isinstance(output, str):
+        return output.strip()
+    
+    if isinstance(output, ChatMessage):
+        content = output.content
+        if isinstance(content, str):
+            return content.strip()
+        # If content is a list of dicts
+        if isinstance(content, list):
+            chunks = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    chunks.append(item["text"])
+                elif isinstance(item, str):
+                    chunks.append(item)
+            return "\n".join(chunks).strip()
+        return str(content).strip()
+    
+    return str(output).strip()

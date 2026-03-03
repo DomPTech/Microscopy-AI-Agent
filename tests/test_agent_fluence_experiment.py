@@ -25,15 +25,14 @@ prompt = '''
 Please run the following experiment:
 
 1) Calibrate screen current.
-2) For the following beam current values (pA): [10, 30, 50, 80, 100, 200, 500, 1000, 5000, 10000] (just do the first four)
-   - Set the beam current on AS using `set_beam_current`.
+2) For the following beam current values (pA): [10, 30, 50, 80, 100, 200, 500, 1000, 5000, 10000]
    - Re-focus using `tune_C1A1`.
    - Acquire the tableau from Ceos with these arguments: {'tabType':"Fast", 'angle':18}.
    - To get the aberrations from the tableau (which is a dictionary):
       - get ['results']['aberrations'].
    - Compute the probe from the returned aberrations and store results in a list.
    - Break after the first iteration for a quick test run.
-3) Capture one image from AS (size 512) and save it.
+3) Capture one image from AS (size 512) and save it. 
 
 Return a short summary of actions and any saved file paths.
 '''
