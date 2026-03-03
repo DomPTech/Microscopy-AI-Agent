@@ -54,22 +54,28 @@ class SessionMemory:
             yaml_path: Absolute path to the source YAML file.
             png_path: Absolute path to the source PNG diagram (optional).
         """
-        yaml_source = Path(yaml_path)
+        yaml_source = Path(yaml_path).resolve()
         if yaml_source.exists():
-            dest_yaml = self.session_dir / yaml_source.name
-            shutil.copy2(yaml_source, dest_yaml)
+            dest_yaml = (self.session_dir / yaml_source.name).resolve()
+            if yaml_source != dest_yaml:
+                shutil.copy2(yaml_source, dest_yaml)
+                print(f"[SessionMemory] Saved workflow YAML: {dest_yaml}")
+            else:
+                print(f"[SessionMemory] Workflow YAML already in session dir: {dest_yaml}")
             self.workflow_yaml_path = dest_yaml
-            print(f"[SessionMemory] Saved workflow YAML: {dest_yaml}")
         else:
             print(f"[SessionMemory] Warning: YAML file not found: {yaml_path}")
         
         if png_path:
-            png_source = Path(png_path)
+            png_source = Path(png_path).resolve()
             if png_source.exists():
-                dest_png = self.session_dir / png_source.name
-                shutil.copy2(png_source, dest_png)
+                dest_png = (self.session_dir / png_source.name).resolve()
+                if png_source != dest_png:
+                    shutil.copy2(png_source, dest_png)
+                    print(f"[SessionMemory] Saved workflow PNG: {dest_png}")
+                else:
+                    print(f"[SessionMemory] Workflow PNG already in session dir: {dest_png}")
                 self.workflow_png_path = dest_png
-                print(f"[SessionMemory] Saved workflow PNG: {dest_png}")
 
     def save_execution_steps(
         self,
@@ -111,7 +117,7 @@ class SessionMemory:
         Returns:
             Absolute path to the saved image in the session folder.
         """
-        source = Path(npy_path)
+        source = Path(npy_path).resolve()
         if not source.exists():
             print(f"[SessionMemory] Warning: Image file not found: {npy_path}")
             return npy_path
@@ -124,8 +130,9 @@ class SessionMemory:
         else:
             dest_name = source.name
         
-        dest_path = self.session_dir / dest_name
-        shutil.copy2(source, dest_path)
+        dest_path = (self.session_dir / dest_name).resolve()
+        if source != dest_path:
+            shutil.copy2(source, dest_path)
         print(f"[SessionMemory] Saved image: {dest_path}")
         
         return str(dest_path)

@@ -3,6 +3,7 @@ import time
 import sys
 import os
 import socket
+from pathlib import Path
 from typing import Optional, Dict, Any, Union
 from smolagents import tool
 import Pyro5.api
@@ -13,9 +14,10 @@ from enum import Enum
 import pyTEMlib.probe_tools as pt
 import json
 
-# Global state for the client and server process
+# Global state
 CLIENT: Optional[object] = None # asyncroscopy.clients.notebook_client.NotebookClient
 SERVER_PROCESSES: Dict[str, subprocess.Popen] = {}
+AGENT_INSTANCE: Optional[object] = None  # Set by Agent.__init__() for artifact memory access
 
 def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
     """Wait for a port to become available (server listening)."""
@@ -259,7 +261,7 @@ def capture_image(detector: str = "Ceta", destination: str = "AS") -> str:
                 from pathlib import Path
                 session_dir = AGENT_INSTANCE.memory.session_dir
                 full_path = str(Path(session_dir) / output_path)
-        except (AttributeError, TypeError):
+        except (AttributeError, TypeError, NameError):
             pass
         
         # Fallback to /tmp if memory not available
@@ -741,10 +743,86 @@ def get_last_created_workflow() -> Optional[str]:
         return next(iter(WORKFLOW_STATE.keys()))
 
 
+def _generate_workflow_diagram(template: WorkflowTemplate, output_path: str) -> bool:
+    """
+    Generate a graphviz diagram of the workflow and save as PNG.
+    
+    Args:
+        template: WorkflowTemplate object with nodes and edges.
+        output_path: Path to save PNG (without .png extension - graphviz adds it).
+    
+    Returns:
+        True if successful, False otherwise.
+    """
+    try:
+        dot = graphviz.Digraph(name="workflow", format="png")
+        dot.attr(rankdir='TB', splines='spline', nodesep='0.6', ranksep='0.8', bgcolor='#121212')
+        dot.attr('edge', fontname='Helvetica,Arial,sans-serif', fontsize='10', color='#888888', arrowsize='0.8')
+        
+        for node in template.nodes:
+            node_id = str(node['id'])
+            node_type = node.get('type', 'Unknown')
+            params = node.get('params', {})
+            
+            # Distinct colors per node type
+            if node_type == 'MicroscopeTool':
+                border_color = '#00FF9D'
+                bg_color = '#002E1C'
+            elif node_type == 'AIContext':
+                border_color = '#00D1FF'
+                bg_color = '#001A24'
+            elif node_type == 'AIQuality':
+                border_color = '#FF9900'
+                bg_color = '#2E1A00'
+            elif node_type == 'CodeNode':
+                border_color = '#FF00FF'
+                bg_color = '#2A002A'
+            else:
+                border_color = '#999999'
+                bg_color = '#222222'
+
+            # Build HTML-like label showing the function / params
+            html_rows = f'<TR><TD ALIGN="CENTER" BORDER="0" CELLPADDING="8"><B><FONT COLOR="{border_color}" POINT-SIZE="16">{node_id}</FONT></B></TD></TR>'
+            html_rows += f'<TR><TD ALIGN="CENTER" BORDER="0" CELLPADDING="2"><FONT COLOR="#AAAAAA" POINT-SIZE="11">{node_type}</FONT></TD></TR>'
+            
+            # Add parameters if they exist
+            if params:
+                for k, v in params.items():
+                    val_str = str(v)[:40] + '...' if len(str(v)) > 40 else str(v)
+                    html_rows += f'<TR><TD ALIGN="LEFT" BORDER="0" CELLPADDING="4"><FONT COLOR="#CCCCCC" POINT-SIZE="10"><B>{k}:</B> {val_str}</FONT></TD></TR>'
+
+            label = f'<<TABLE BORDER="1" COLOR="{border_color}" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" BGCOLOR="{bg_color}" STYLE="ROUNDED">{html_rows}</TABLE>>'
+
+            if node_id in ['__start__', '__end__', 'start', 'end']:
+                dot.node(node_id, node_id, shape='ellipse', style='filled,rounded', fillcolor='#333333', color='#888888', fontcolor='#FFFFFF', fontname='Helvetica,Arial,sans-serif')
+            else:
+                dot.node(node_id, label, shape='none', margin='0')
+            
+        for edge in template.edges:
+            edge_kwargs = {}
+            if 'style' in edge:
+                edge_kwargs['style'] = str(edge['style'])
+            if 'label' in edge:
+                label_text = str(edge['label'])
+                edge_kwargs['label'] = f'<<TABLE BORDER="0" CELLBORDER="1" COLOR="#333333" CELLPADDING="4" BGCOLOR="#222222"><TR><TD><FONT COLOR="#FFFFFF" POINT-SIZE="10">{label_text}</FONT></TD></TR></TABLE>>'
+                
+            dot.edge(str(edge['source']), str(edge['target']), **edge_kwargs)
+        
+        # Save to specified path (graphviz adds .png extension)
+        output_dir = Path(output_path).parent
+        output_name = Path(output_path).stem
+        dot.render(str(output_dir / output_name), cleanup=True)
+        
+        return True
+    except Exception as e:
+        print(f"[Warning] Failed to generate workflow diagram: {e}")
+        return False
+
+
 @tool
 def design_workflow(name: str, yaml_content: str) -> str:
     """
-    Designs a new experimental workflow by parsing and validating a YAML configuration.
+    Designs a new experimental workflow by parsing, validating, and saving a YAML configuration.
     The AI should output the YAML content as a string.
     
     CRITICAL: You MUST use a `CodeNode` for any logic that requires iteration (like for/while loops). 
@@ -758,14 +836,48 @@ def design_workflow(name: str, yaml_content: str) -> str:
                       'edges' (list of dicts with 'source' and 'target'). Types can be 'MicroscopeTool' 
                       (params: 'tool', 'args'), 'AIContext' (params: 'query'), 'AIQuality' (params: 'evaluate_node'),
                       or 'CodeNode' (params: 'description').
+    
+    Returns:
+        Absolute path to the saved YAML workflow file.
     """
     
     try:
         parsed_yaml = yaml.safe_load(yaml_content)
-        # Validate through Pydantic
         template = WorkflowTemplate(**parsed_yaml)
         
-        return f"Successfully designed workflow '{name}'! Workflow is valid and ready to execute. Please ask the user to approve the workflow before calling execute_workflow."
+        from pathlib import Path
+        artifacts_dir = Path(settings.artifacts_dir)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get current session folder if agent has memory
+        session_dir = None
+        try:
+            if AGENT_INSTANCE and hasattr(AGENT_INSTANCE, 'memory') and AGENT_INSTANCE.memory:
+                session_dir = AGENT_INSTANCE.memory.session_dir
+        except Exception:
+            pass
+        
+        # Save to session folder if available, otherwise to artifacts root
+        if session_dir and Path(session_dir).exists():
+            save_dir = Path(session_dir)
+        else:
+            save_dir = artifacts_dir
+        
+        filename = f"{name.replace(' ', '_').lower()}.yaml"
+        yaml_path = save_dir / filename
+        
+        with open(yaml_path, 'w') as f:
+            f.write(yaml_content)
+        
+        yaml_path_abs = str(yaml_path.resolve())
+        
+        # Generate workflow diagram (PNG)
+        png_base_path = str(save_dir / Path(yaml_path_abs).stem)
+        _generate_workflow_diagram(template, png_base_path)
+        
+        register_workflow_created(yaml_path_abs)
+        
+        return yaml_path_abs
     except Exception as e:
         return f"Failed to design workflow: {str(e)}"
 
