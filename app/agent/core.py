@@ -131,12 +131,53 @@ class Agent:
         if ram_gb > 16:
             low_cpu_mem_usage = False
 
+        # Extract model size from model_id to configure parameters appropriately
+        # Larger models need higher temperature and more tokens for proper tool usage
+        model_size_b = 0
+        try:
+            import re
+            size_match = re.search(r'(\d+\.?\d*)B', model_id)
+            if size_match:
+                model_size_b = float(size_match.group(1))
+        except:
+            pass
+        
+        # Small models (<3B): Conservative settings
+        # Medium models (3-14B): Balanced 
+        # Large models (>14B): More freedom for complex reasoning and tool use
+        if model_size_b < 3:
+            max_tokens = 512
+            temperature = 0.4
+            top_p = 0.85
+            rep_penalty = 1.15
+        elif model_size_b <= 14:
+            max_tokens = 1024
+            temperature = 0.6
+            top_p = 0.9
+            rep_penalty = 1.1
+        else:
+            max_tokens = 1536
+            temperature = 0.7
+            top_p = 0.95
+            rep_penalty = 1.05
+
+        # Store generation parameters for reuse
+        self.gen_params = {
+            "max_new_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "repetition_penalty": rep_penalty,
+        }
+        
         self.model = TransformersModel(
             model_id=model_id,
-            max_new_tokens=1024,
+            max_new_tokens=max_tokens,
             device_map="mps" if torch.backends.mps.is_available() else "auto",
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=rep_penalty,
             model_kwargs={
                 "low_cpu_mem_usage": low_cpu_mem_usage,
                 "use_cache": True,
@@ -146,7 +187,8 @@ class Agent:
         # Full tool suite for the microscopy agent
         self.agent = CodeAgent(
             tools=TOOLS, 
-            model=self.model, 
+            model=self.model,
+            max_steps=settings.agent_max_steps,  # Configurable limit to prevent infinite loops
             executor=SupervisedExecutor(additional_authorized_imports=[
                 "app.tools.microscopy", "app.config.*", 
                 "numpy", "time", "os", "scipy", "json", "yaml"
@@ -164,7 +206,7 @@ class Agent:
             1. Use 'settings' for configuration:
                - Use 'settings.server_host' and 'settings.server_port' for connections.
                - Use 'settings.autoscript_path' if needed for server startup.
-                2. Reliability and truthfulness are mandatory:
+            2. Reliability and truthfulness are mandatory:
                     - Never claim success unless tool outputs explicitly confirm success.
                     - If any tool output contains failure indicators (e.g. "error", "failed", "could not", "exception", "timeout"), treat the task as failed.
                     - When a step fails, report the failure clearly and include the failing step + output.
@@ -224,6 +266,7 @@ class Agent:
         subagent = CodeAgent(
             tools=filtered_tools,
             model=self.model,
+            max_steps=settings.agent_max_steps,  # Configurable limit to prevent infinite loops
             executor=SupervisedExecutor(additional_authorized_imports=[
                 "app.tools.microscopy", "app.config.*",
                 "numpy", "time", "os", "scipy", "json", "yaml"
@@ -271,7 +314,13 @@ class Agent:
     ) -> tuple[Optional[str], str]:
         """Run the agent to design a workflow and detect the created YAML path via tool state."""
         last_output = ""
-        for _ in range(max_attempts):
+        base_prompt = prompt_text
+        retry_instruction = (
+            "You did not create a workflow using the `design_workflow` tool. "
+            "Please call `design_workflow(name, yaml_content)` and then return the absolute path of the saved YAML file."
+        )
+
+        for attempt in range(max_attempts):
             self._emit(emit, "\nAgent is working on the workflow...\n")
             last_output = str(self.agent.run(prompt_text)).strip()
             self._emit(emit, f"\nAgent Output:\n{last_output}\n")
@@ -283,10 +332,8 @@ class Agent:
             except Exception:
                 pass
 
-            prompt_text = (
-                "You did not create a workflow using the `design_workflow` tool. "
-                "Please call `design_workflow(name, yaml_content)` and then return the absolute path of the saved YAML file."
-            )
+            if attempt < max_attempts - 1:
+                prompt_text = f"{base_prompt}\n\n{retry_instruction}"
 
         return None, last_output
 
@@ -450,10 +497,9 @@ class Agent:
                 target=self.model.model.generate,
                 kwargs={
                     "input_ids": input_ids,
-                    "max_new_tokens": 1024,
                     "streamer": streamer,
                     "do_sample": True,
-                    "top_p": 0.9,
+                    **self.gen_params,  # Use same parameters as agent model
                 }
             )
             generation_thread.start()
