@@ -44,6 +44,9 @@ class MicroscopeSettings(BaseSettings):
     # Agent Approval Control
     agent_autorun: bool = Field(False, description="If True, allow agent to execute tools without requiring manual approval. If False, each tool call requires user confirmation.")
 
+    # Agent Execution Control
+    agent_max_steps: int = Field(10, description="Maximum number of tool calls the agent can make in a single run to prevent infinite loops.")
+
     # Artifact & Memory Storage
     artifacts_dir: str = Field("./artifacts", description="Base directory for saving session artifacts (workflows, images, chat history, execution steps).")
 
