@@ -18,7 +18,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import torch
-from smolagents import CodeAgent, TransformersModel, DuckDuckGoSearchTool
+from smolagents import CodeAgent, TransformersModel, ActionStep
 from smolagents.models import ChatMessageStreamDelta, ChatMessage
 
 from app.tools.microscopy import TOOLS, NODE_REGISTRY, MicroscopeServer, WorkflowTemplate, WorkflowExecutor
@@ -116,6 +116,10 @@ class Agent:
             session_name=session_name
         )
 
+        # Workflow approval state
+        self.workflow_approval_pending = False
+        self.detected_workflow_path = None
+
         # Auto-select model based on available RAM
         if model_id == "Auto" or not model_id:
             if ram_gb < 16:
@@ -193,6 +197,7 @@ class Agent:
                 "app.tools.microscopy", "app.config.*", 
                 "numpy", "time", "os", "scipy", "json", "yaml"
             ]),
+            step_callbacks={ActionStep : self._handle_agent_step},
             instructions="""
             You are an expert microscopy AI assistant. 
             You can control the microscope by starting the server, connecting the client, and then using tools to:
@@ -288,6 +293,31 @@ class Agent:
         
         return str(subagent.run(prompt)).strip()
 
+    def _handle_agent_step(self, memory_step, agent) -> None:
+        """
+        Callback invoked after each agent step to check for workflow creation.
+        If a workflow was just designed, captures it and triggers approval flow.
+        """
+        if not isinstance(memory_step, ActionStep):
+            return
+        
+        if not self.workflow_approval_pending:
+            return
+        
+        # Check if design_workflow was called in the code action
+        if memory_step.code_action and "design_workflow(" in memory_step.code_action:
+            # design_workflow was called in this step, check if it completed successfully
+            try:
+                workflow_path = microscopy.get_last_created_workflow()
+                if workflow_path and Path(workflow_path).exists() and workflow_path != self.detected_workflow_path:
+                    self.detected_workflow_path = workflow_path
+                    # Signal that we should halt and request approval
+                    raise Exception("__WORKFLOW_CREATED__")
+            except Exception as e:
+                if "__WORKFLOW_CREATED__" in str(e):
+                    raise
+                pass
+
     @staticmethod
     def _emit(emit: Optional[Callable[[str], None]], message: str) -> None:
         if emit and message:
@@ -312,7 +342,7 @@ class Agent:
         max_attempts: int = 3,
         emit: Optional[Callable[[str], None]] = None,
     ) -> tuple[Optional[str], str]:
-        """Run the agent to design a workflow and detect the created YAML path via tool state."""
+        """Run the agent to design a workflow and detect the created YAML path via step callback."""
         last_output = ""
         base_prompt = prompt_text
         retry_instruction = (
@@ -320,14 +350,35 @@ class Agent:
             "Please call `design_workflow(name, yaml_content)` and then return the absolute path of the saved YAML file."
         )
 
+        # Enable workflow approval detection via step callback
+        self.workflow_approval_pending = True
+        self.detected_workflow_path = None
+
         for attempt in range(max_attempts):
             self._emit(emit, "\nAgent is working on the workflow...\n")
-            last_output = str(self.agent.run(prompt_text)).strip()
-            self._emit(emit, f"\nAgent Output:\n{last_output}\n")
+            try:
+                last_output = str(self.agent.run(prompt_text)).strip()
+            except Exception as e:
+                # Check if this is our workflow creation signal
+                if "__WORKFLOW_CREATED__" in str(e):
+                    # Workflow was detected by step callback
+                    if self.detected_workflow_path:
+                        self._emit(emit, f"\n✓ Workflow created at: {self.detected_workflow_path}\n")
+                        self.workflow_approval_pending = False
+                        return self.detected_workflow_path, last_output
+                else:
+                    # Other exception, log and continue retry loop
+                    last_output = str(e)
+                    self._emit(emit, f"\nAgent error: {e}\n")
+            else:
+                self._emit(emit, f"\nAgent Output:\n{last_output}\n")
 
+            # Also check if workflow was created (fallback for agents that complete without signal)
             try:
                 yaml_path = microscopy.get_last_created_workflow()
-                if yaml_path and Path(yaml_path).exists():
+                if yaml_path and Path(yaml_path).exists() and yaml_path != self.detected_workflow_path:
+                    self.detected_workflow_path = yaml_path
+                    self.workflow_approval_pending = False
                     return yaml_path, last_output
             except Exception:
                 pass
@@ -335,6 +386,7 @@ class Agent:
             if attempt < max_attempts - 1:
                 prompt_text = f"{base_prompt}\n\n{retry_instruction}"
 
+        self.workflow_approval_pending = False
         return None, last_output
 
     def _execute_workflow(self, parsed_yaml_path: str, emit: Optional[Callable[[str], None]] = None) -> str:
@@ -388,9 +440,6 @@ class Agent:
             return (
                 f"Workflow {template.name} execution finished.\\n\\n"
                 f"Summary:\\n{full_summary}\\n\\n"
-                f"History: {history_text}\\n"
-                f"Errors: {errors_text}\\n"
-                f"Metrics: {metrics_text}"
             )
         except Exception as e:
             return f"Failed to execute workflow: {e}"
