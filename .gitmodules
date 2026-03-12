@@ -1,3 +1,4 @@
 [submodule "external/asyncroscopy"]
 	path = external/asyncroscopy
-	url = https://github.com/DomPTech/asyncroscopy.git
+	url = https://github.com/DomPTech/asyncroscopy-agent-version.git
+	branch = PyTango-dev
