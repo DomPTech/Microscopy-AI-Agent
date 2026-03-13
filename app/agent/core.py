@@ -18,7 +18,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import torch
-from smolagents import CodeAgent, TransformersModel, ActionStep
+from smolagents import CodeAgent, TransformersModel, ActionStep, Model
 from smolagents.models import ChatMessageStreamDelta, ChatMessage
 
 from app.tools import microscopy
@@ -109,10 +109,8 @@ class MicroscopeClientProxy:
         return getattr(microscopy.CLIENT, name)
 
 class Agent:
-    def __init__(self, model_id: str = "Auto", session_name: str = ""):
-        ram_gb = get_total_ram_gb()
-        load_in_8bit = False
-        low_cpu_mem_usage = True
+    def __init__(self, model: Model, session_name: str = ""):
+        self.model = model
 
         # Initialize session memory
         self.memory = SessionMemory(
@@ -124,74 +122,6 @@ class Agent:
         self.workflow_approval_pending = False
         self.detected_workflow_path = None
 
-        # Auto-select model based on available RAM
-        if model_id == "Auto" or not model_id:
-            if ram_gb < 16:
-                model_id = "Qwen/Qwen2.5-0.5B-Instruct"
-                # bitsandbytes 8-bit isn't stable on MPS yet
-                load_in_8bit = False if torch.backends.mps.is_available() else True
-            elif ram_gb > 48:
-                # 14B fits comfortably under 50GB (approx 28GB in FP16)
-                model_id = "Qwen/Qwen2.5-14B-Instruct" 
-            else:
-                model_id = "Qwen/Qwen2.5-7B-Instruct" # ~15GB
-
-        if ram_gb > 16:
-            low_cpu_mem_usage = False
-
-        # Extract model size from model_id to configure parameters appropriately
-        # Larger models need higher temperature and more tokens for proper tool usage
-        model_size_b = 0
-        try:
-            import re
-            size_match = re.search(r'(\d+\.?\d*)B', model_id)
-            if size_match:
-                model_size_b = float(size_match.group(1))
-        except:
-            pass
-        
-        # Small models (<3B): Conservative settings
-        # Medium models (3-14B): Balanced 
-        # Large models (>14B): More freedom for complex reasoning and tool use
-        if model_size_b < 3:
-            max_tokens = 512
-            temperature = 0.4
-            top_p = 0.85
-            rep_penalty = 1.15
-        elif model_size_b <= 14:
-            max_tokens = 1024
-            temperature = 0.6
-            top_p = 0.9
-            rep_penalty = 1.1
-        else:
-            max_tokens = 1536
-            temperature = 0.7
-            top_p = 0.95
-            rep_penalty = 1.05
-
-        # Store generation parameters for reuse
-        self.gen_params = {
-            "max_new_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "repetition_penalty": rep_penalty,
-        }
-        
-        self.model = TransformersModel(
-            model_id=model_id,
-            max_new_tokens=max_tokens,
-            device_map="mps" if torch.backends.mps.is_available() else "auto",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            temperature=temperature,
-            top_p=top_p,
-            repetition_penalty=rep_penalty,
-            model_kwargs={
-                "low_cpu_mem_usage": low_cpu_mem_usage,
-                "use_cache": True,
-                "load_in_4bit": True,
-            }
-        )
         # Full tool suite for the microscopy agent
         self.agent = CodeAgent(
             tools=TOOLS, 
@@ -237,6 +167,67 @@ class Agent:
 
         # Preload common classes into the Python executor context
         self._setup_executor_context()
+    
+    @classmethod
+    def from_model_id(cls, model_id: str = "Auto", session_name: str = "") -> "Agent":
+        # Extract model size from model_id to configure parameters appropriately
+        # Larger models need higher temperature and more tokens for proper tool usage
+        model_size_b = 0
+        try:
+            import re
+            size_match = re.search(r'(\d+\.?\d*)B', model_id)
+            if size_match:
+                model_size_b = float(size_match.group(1))
+        except:
+            pass
+        
+        # Small models (<3B): Conservative settings
+        # Medium models (3-14B): Balanced 
+        # Large models (>14B): More freedom for complex reasoning and tool use
+        if model_size_b < 3:
+            max_tokens = 512
+            temperature = 0.4
+            top_p = 0.85
+            rep_penalty = 1.15
+        elif model_size_b <= 14:
+            max_tokens = 1024
+            temperature = 0.6
+            top_p = 0.9
+            rep_penalty = 1.1
+        else:
+            max_tokens = 1536
+            temperature = 0.7
+            top_p = 0.95
+            rep_penalty = 1.05
+
+        # Store generation parameters for reuse
+        gen_params = {
+            "max_new_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "repetition_penalty": rep_penalty,
+        }
+
+        low_cpu_mem_usage = get_total_ram_gb() < 32
+        
+        model = TransformersModel(
+            model_id=model_id,
+            max_new_tokens=max_tokens,
+            device_map="mps" if torch.backends.mps.is_available() else "auto",
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=rep_penalty,
+            model_kwargs={
+                "low_cpu_mem_usage": low_cpu_mem_usage,
+                "use_cache": True,
+                "load_in_4bit": True,
+            }
+        )
+        instance = cls(model=model, session_name=session_name)
+        instance.gen_params = gen_params
+        return instance
     
     def _setup_executor_context(self):
         """

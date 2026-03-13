@@ -35,5 +35,5 @@ Please run the following experiment:
 Return a short summary of actions and any saved file paths.
 '''
 
-agent = Agent(model_id="Qwen/Qwen2.5-Coder-32B-Instruct")
+agent = Agent.from_model_id(model_id="Qwen/Qwen2.5-Coder-32B-Instruct")
 print(agent.chat(prompt))

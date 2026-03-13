@@ -40,3 +40,5 @@ venv.bak/
 
 # Artifacts
 artifacts/
+
+.env

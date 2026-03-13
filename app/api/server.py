@@ -25,7 +25,7 @@ async def initialize(req: InitializeRequest):
     """
     global _agent
     try:
-        _agent = Agent(model_id=req.model_id)
+        _agent = Agent.from_model_id(model_id=req.model_id)
         return HealthResponse(status="initialized", model_id=req.model_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

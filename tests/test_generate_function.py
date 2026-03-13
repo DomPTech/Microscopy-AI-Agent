@@ -8,8 +8,7 @@ from app.config import settings
 settings.hf_cache_dir = "/lustre/isaac24/scratch/dpelaia/hf_cache/"
 from app.agent.core import Agent
 
-
-agent = Agent(model_id="Qwen/Qwen2.5-0.5B-Instruct")
+agent = Agent.from_model_id(model_id="Qwen/Qwen2.5-0.5B-Instruct")
 
 # Consume the generator to stream output and get final response
 for output in agent.generate("Explain microscopy to me!"):
