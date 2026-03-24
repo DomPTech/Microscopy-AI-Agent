@@ -1,8 +1,6 @@
 import sys
 from pathlib import Path
 from typing import Callable, Optional, Union
-from transformers import TextIteratorStreamer
-from threading import Thread
 import yaml
 import numpy as np
 
@@ -18,7 +16,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import torch
-from smolagents import CodeAgent, TransformersModel, ActionStep, Model
+from smolagents import CodeAgent, TransformersModel, ActionStep, Model, LiteLLMModel
 from smolagents.models import ChatMessageStreamDelta, ChatMessage
 
 from app.tools import microscopy
@@ -228,7 +226,16 @@ class Agent:
         instance = cls(model=model, session_name=session_name)
         instance.gen_params = gen_params
         return instance
-    
+
+    @classmethod
+    def from_api_key(cls, model_id: str, api_base: str, api_key: str, session_name: str = "") -> "Agent":
+        model = LiteLLMModel(
+            model_id=model_id,
+            api_base=api_base,
+            api_key=api_key
+        )
+        return cls(model=model, session_name=session_name)
+
     def _setup_executor_context(self):
         """
         Injects common variables/classes/modules into the Python executor context.
@@ -360,7 +367,7 @@ class Agent:
             except WorkflowCreated:
                 # Workflow was detected by step callback
                 if self.detected_workflow_path:
-                    self._emit(emit, f"\n✓ Workflow created at: {self.detected_workflow_path}\n")
+                    self._emit(emit, f"\nâ Workflow created at: {self.detected_workflow_path}\n")
                     self.workflow_approval_pending = False
                     return self.detected_workflow_path, last_output
             except Exception as e:
@@ -522,58 +529,42 @@ class Agent:
     
     def generate(self, query: str):
         """
-        Streams response to a query using the underlying model's generate method
+        Streams response to a query using the underlying smolagents model API.
         Finally yields a tuple ("final", complete_response).
         """
         
         try:
             message = ChatMessage(role="user", content=query)
-            
-            tokenizer = self.model.tokenizer
-            prompt_dict = tokenizer.apply_chat_template(
-                [message],
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True
-            )
-            input_ids = prompt_dict["input_ids"].to(self.model.model.device)
-            
-            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-            
-            # Run generation in a thread
-            generation_thread = Thread(
-                target=self.model.model.generate,
-                kwargs={
-                    "input_ids": input_ids,
-                    "streamer": streamer,
-                    "do_sample": True,
-                    **self.gen_params,  # Use same parameters as agent model
-                }
-            )
-            generation_thread.start()
-            
-            # Collect full text while yielding chunks
+            gen_kwargs = dict(getattr(self, "gen_params", {}))
+
             full_text = ""
-            for chunk in streamer:
-                if isinstance(chunk, list):
-                    chunk = "".join(str(x) for x in chunk)
-                elif not isinstance(chunk, str):
-                    chunk = str(chunk)
-                
-                full_text += chunk
-                if chunk.strip():
-                    yield chunk
-            
-            generation_thread.join()
-            
+            stream_fn = getattr(self.model, "generate_stream", None)
+
+            # Prefer model-native streaming when supported.
+            if callable(stream_fn):
+                for delta in stream_fn(messages=[message], **gen_kwargs):
+                    chunk = _extract_generated_text(delta)
+                    if not chunk:
+                        continue
+                    full_text += chunk
+                    if chunk.strip():
+                        yield chunk
+
+                yield ("final", full_text.strip())
+                return
+
+            # Fallback for models without generate_stream.
+            output = self.model.generate(messages=[message], **gen_kwargs)
+            full_text = _extract_generated_text(output)
+            if full_text.strip():
+                yield full_text
             yield ("final", full_text.strip())
             
         except Exception as e:
             error_msg = f"[Warning] Failed to generate response: {e}"
             yield ("error", error_msg)
 
-def _extract_generated_text(output: Union[str, ChatMessage]) -> str:
+def _extract_generated_text(output: Union[str, ChatMessage, ChatMessageStreamDelta, dict, object]) -> str:
     """
     Extract plain text from model.generate() output.
     """
@@ -597,5 +588,20 @@ def _extract_generated_text(output: Union[str, ChatMessage]) -> str:
                     chunks.append(item)
             return "\n".join(chunks).strip()
         return str(content).strip()
+
+    if isinstance(output, ChatMessageStreamDelta):
+        if output.content is None:
+            return ""
+        if isinstance(output.content, str):
+            return output.content
+        return str(output.content)
+
+    if isinstance(output, dict):
+        content = output.get("content", "")
+        if isinstance(content, str):
+            return content
+        if content is None:
+            return ""
+        return str(content)
     
     return str(output).strip()
