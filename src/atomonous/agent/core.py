@@ -22,14 +22,12 @@ import torch
 from smolagents import CodeAgent, TransformersModel, ActionStep, Model, LiteLLMModel, MCPClient
 from smolagents.models import ChatMessageStreamDelta, ChatMessage
 
-from app.tools import microscopy
-from app.tools.microscopy import NODE_REGISTRY, WorkflowTemplate, WorkflowExecutor, get_last_created_workflow
-from app.utils.helpers import get_total_ram_gb
-from app.utils.memory import SessionMemory
-from app.agent.supervised_executor import SupervisedExecutor
-from app.config import settings
-
-import pyTEMlib.probe_tools as pt
+from atomonous.tools import microscopy
+from atomonous.tools.microscopy import NODE_REGISTRY, WorkflowTemplate, WorkflowExecutor, get_last_created_workflow
+from atomonous.utils.helpers import get_total_ram_gb
+from atomonous.utils.memory import SessionMemory
+from atomonous.agent.supervised_executor import SupervisedExecutor
+from atomonous.config import settings
 
 
 class WorkflowCreated(Exception):

@@ -2,10 +2,9 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 import json
-from app.api.models import InitializeRequest, ChatRequest, ChatResponse, HealthResponse
-from app.config import settings
-settings.hf_cache_dir = "/lustre/isaac24/scratch/dpelaia/hf_cache/"
-from app.agent.core import Agent
+from atomonous.api.models import InitializeRequest, ChatRequest, ChatResponse, HealthResponse
+from atomonous.config import settings
+from atomonous.agent.core import Agent
 
 app = FastAPI(title="Microscopy AI Agent API")
 

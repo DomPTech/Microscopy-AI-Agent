@@ -5,6 +5,9 @@ import base64
 import matplotlib.pyplot as plt
 import sys
 import os
+from atomonous.config import settings
+from atomonous.agent.core import Agent
+from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -67,8 +70,8 @@ def basic_connection_test():
     finally:
         mcp_client.disconnect()
 
-from app.config import settings
-from app.agent.core import Agent
+from atomonous.config import settings
+from atomonous.agent.core import Agent
 from dotenv import load_dotenv
 
 load_dotenv()

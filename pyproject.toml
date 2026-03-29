@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "microscopy-ai-agent-demo"
 version = "0.1.0"
 dependencies = [
-    "streamlit",
-    "smolagents[toolkit,mcp]",
+    "smolagents[toolkit,mcp,litellm]",
+    "litellm==1.82.2",
     "transformers",
     "accelerate",
     "bitsandbytes",
@@ -34,5 +34,10 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["app*"]
+where = ["src"]
+include = ["atomonous*"]
+
+[tool.uv]
+override-dependencies = [
+    "litellm==1.82.2",
+]

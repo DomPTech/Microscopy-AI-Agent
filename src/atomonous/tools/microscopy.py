@@ -11,9 +11,8 @@ import Pyro5.errors
 import numpy as np
 # import tango
 # from tango.test_context import MultiDeviceTestContext
-from app.config import settings
+from atomonous.config import settings
 from enum import Enum
-import pyTEMlib.probe_tools as pt
 import json
 
 try:
@@ -38,7 +37,7 @@ TOOLS = []
 import os
 import yaml
 import graphviz
-from app.tools.workflow_framework import WorkflowState, WorkflowNode, WorkflowTemplate, WorkflowExecutor
+from atomonous.tools.workflow_framework import WorkflowState, WorkflowNode, WorkflowTemplate, WorkflowExecutor
 
 class MicroscopeToolNode(WorkflowNode):
     def execute(self, state: WorkflowState, context: Optional[dict] = None) -> WorkflowState:

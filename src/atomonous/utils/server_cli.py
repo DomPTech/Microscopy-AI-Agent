@@ -4,8 +4,8 @@ import os
 # Ensure the root directory is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from app.tools.microscopy import start_server, connect_client
-from app.config import settings
+from atomonous.tools.microscopy import start_server, connect_client
+from atomonous.config import settings
 
 def show_interactive_server_commands():
     print("=" * 40)
@@ -44,7 +44,7 @@ def show_interactive_server_commands():
     print(f"Instrument Host: {settings.instrument_host}:{settings.instrument_port}")
     print("-" * 40)
     
-    # Call the start_server tool from app.tools.microscopy
+    # Call the start_server tool from atomonous.tools.microscopy
     try:
         result = start_server(mode=mode)
         print("\n[RESULT]")
