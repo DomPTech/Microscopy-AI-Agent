@@ -7,9 +7,10 @@ name = "microscopy-ai-agent-demo"
 version = "0.1.0"
 dependencies = [
     "streamlit",
-    "smolagents[toolkit]",
+    "smolagents[toolkit,mcp]",
     "transformers",
     "accelerate",
+    "bitsandbytes",
     "psutil",
     "wikipedia-api",
     "twisted",
@@ -21,7 +22,6 @@ dependencies = [
     "scipy",
     "matplotlib",
     "scikit-image",
-    "pyTEMlib",
     "pydantic",
     "pydantic-settings",
     "pytest",
