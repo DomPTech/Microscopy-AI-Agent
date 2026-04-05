@@ -1,7 +1,7 @@
 import ast
 
 from smolagents import LocalPythonExecutor
-from app.config import settings
+from atomonous.config import settings
 
 class SupervisedExecutor(LocalPythonExecutor):
     """
