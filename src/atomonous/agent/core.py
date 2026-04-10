@@ -29,6 +29,7 @@ from atomonous.utils.helpers import get_total_ram_gb
 from atomonous.utils.memory import SessionMemory
 from atomonous.agent.supervised_executor import SupervisedExecutor
 from atomonous.config import settings
+from atomonous.data.factory import ConverterFactory
 
 
 class WorkflowCreated(Exception):
@@ -104,7 +105,7 @@ def _should_generate_workflow(query: str) -> bool:
 
 
 class Agent:
-    def __init__(self, model: Model, session_name: str = ""):
+    def __init__(self, model: Model, session_name: str = "", data_factory: Optional[ConverterFactory] = None):
         self.model = model
 
         # Initialize session memory
@@ -112,6 +113,9 @@ class Agent:
             artifacts_base_dir=settings.artifacts_dir,
             session_name=session_name
         )
+
+        # Use provided factory or default to None (no conversion)
+        self.data_factory = data_factory
 
         # Initialize MCP Client
         self.mcp_client = MCPClient({"url": settings.mcp_url, "transport": "streamable-http"}, structured_output=False)
@@ -162,7 +166,7 @@ class Agent:
         self._setup_executor_context()
     
     @classmethod
-    def from_model_id(cls, model_id: str = "Auto", session_name: str = "") -> "Agent":
+    def from_model_id(cls, model_id: str = "Auto", session_name: str = "", data_factory: Optional[ConverterFactory] = None) -> "Agent":
         # Extract model size from model_id to configure parameters appropriately
         # Larger models need higher temperature and more tokens for proper tool usage
         model_size_b = 0
@@ -218,29 +222,33 @@ class Agent:
                 "load_in_4bit": True,
             }
         )
-        instance = cls(model=model, session_name=session_name)
+        instance = cls(model=model, session_name=session_name, data_factory=data_factory)
         instance.gen_params = gen_params
         return instance
 
     @classmethod
-    def from_api_key(cls, model_id: str, api_base: str, api_key: str, session_name: str = "") -> "Agent":
+    def from_api_key(cls, model_id: str, api_base: str, api_key: str, session_name: str = "", data_factory: Optional[ConverterFactory] = None) -> "Agent":
         model = LiteLLMModel(
             model_id=model_id,
             api_base=api_base,
             api_key=api_key
         )
-        return cls(model=model, session_name=session_name)
+        return cls(model=model, session_name=session_name, data_factory=data_factory)
 
     def _setup_executor_context(self):
         """
         Injects common variables/classes/modules into the Python executor context.
         """
         try:
-            self.agent.python_executor.send_variables({
+            context = {
                 "np": np,
                 "settings": settings,
                 "yaml": yaml,
-            })
+            }
+            if self.data_factory:
+                context["data_factory"] = self.data_factory
+                
+            self.agent.python_executor.send_variables(context)
         except Exception:
             # Non-fatal: some executors may not support variable injection
             pass
