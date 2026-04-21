@@ -157,7 +157,7 @@ class Agent:
             top_p=top_p,
             repetition_penalty=rep_penalty,
             model_kwargs={
-                "low_cpu_mem_usage": get_total_ram_gb() < 32,
+                "low_cpu_mem_usage": True,
                 "use_cache": True,
                 "load_in_4bit": True,
             }
