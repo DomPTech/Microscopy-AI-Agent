@@ -42,5 +42,3 @@ venv.bak/
 artifacts/
 
 .env
-
-uv.lock
