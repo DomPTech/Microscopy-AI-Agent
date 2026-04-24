@@ -4,12 +4,12 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from atomonous.config import settings
+from atomonous import settings
 
 # Uncomment to set a custom model cache directory if needed
 # settings.hf_cache_dir = "/lustre/isaac24/scratch/dpelaia/hf_cache/"
 
-from atomonous.agent.core import Agent
+from atomonous import Agent
 
 # load_dotenv()
 

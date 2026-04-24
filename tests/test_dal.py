@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
 from PIL import Image
-from atomonous.data.factory import ConverterFactory
-from atomonous.data.converters import DataConverter
+from atomonous import ConverterFactory, DataConverter
 import pytest
 import h5py
 
