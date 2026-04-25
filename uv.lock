@@ -872,8 +872,12 @@ dependencies = [
     { name = "pyyaml" },
     { name = "smolagents", extra = ["litellm", "mcp", "toolkit", "transformers"] },
     { name = "torch" },
-    { name = "transformers", extra = ["serving"] },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+serving = [
+    { name = "transformers", extra = ["serving"] },
 ]
 
 [package.metadata]
@@ -895,9 +899,10 @@ requires-dist = [
     { name = "pyyaml" },
     { name = "smolagents", extras = ["toolkit", "mcp", "litellm", "transformers"] },
     { name = "torch" },
-    { name = "transformers", extras = ["serving"], specifier = ">=4.57.6" },
+    { name = "transformers", extras = ["serving"], marker = "extra == 'serving'", specifier = ">=4.57.6" },
     { name = "uvicorn" },
 ]
+provides-extras = ["serving"]
 
 [[package]]
 name = "mpmath"
