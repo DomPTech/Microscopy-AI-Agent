@@ -33,6 +33,7 @@ from atomonous.agent.supervised_executor import SupervisedExecutor
 from atomonous.agent.models import SafeLiteLLMModel
 from atomonous.config import settings
 from atomonous.data.factory import ConverterFactory
+from atomonous.tools.symbolic_regression_tool import SymbolicRegressionTool
 
 class Agent:
     def __init__(self, model: Model, session_name: str = "", data_factory: Optional[ConverterFactory] = None):
@@ -50,8 +51,13 @@ class Agent:
         else:
             self.data_factory = data_factory
 
+        # Initialize default tools
+        default_tools = [
+            SymbolicRegressionTool()
+        ]
+
         self.agent = CodeAgent(
-            tools=[], 
+            tools=default_tools, 
             model=self.model,
             max_steps=settings.agent_max_steps,
             step_callbacks={ActionStep : self._process_step},

@@ -25,6 +25,7 @@ dependencies = [
     "Pillow",
     "h5py",
     "torch",
+    "gplearn",
 ]
 
 [project.optional-dependencies]
