@@ -6,6 +6,7 @@ from PIL import Image
 
 from atomonous.config import settings
 from atomonous.data.factory import ConverterFactory
+from atomonous.agent.ast_utils import _KwargTransformer
 
 class SupervisedExecutor(LocalPythonExecutor):
     """
@@ -39,7 +40,7 @@ class SupervisedExecutor(LocalPythonExecutor):
         Return tool names called in the code snippet that are in the dangerous_tools list.
         Only names present in this executor's static tools are considered.
         """
-        static_tools = getattr(self, "static_tools", {}) or {}
+        static_tools = self.static_tools or {}
         tool_names = set(static_tools.keys())
         if not tool_names:
             return []
@@ -88,11 +89,29 @@ class SupervisedExecutor(LocalPythonExecutor):
             else:
                 print("Invalid input. Please enter 'y' or 'n'.")
 
-    def __call__(self, code_action):
+    def _rewrite_positional_args(self, code_action: str) -> str:
+        """
+        Replaces positional arguments with keyword arguments 
+        """
+        try:
+            static_tools = self.static_tools or {}
+            
+            tree = ast.parse(code_action)
+            tree = _KwargTransformer(static_tools).visit(tree)
+            ast.fix_missing_locations(tree)
+            return ast.unparse(tree)
+        except Exception as e:
+            print(f"Warning: Failed to rewrite code action for positional arguments: {e}")
+            return code_action
+
+    def __call__(self, code_action: str):
         """
         Execute code actions with per-tool approval, unless autorun is enabled.
         Automatically converts tool outputs using the data factory if present.
         """
+        # Intercept and rewrite positional arguments to keyword arguments
+        code_action = self._rewrite_positional_args(code_action)
+
         if self.data_factory:
             self.intercepted_artifacts = [] # Reset for new code action
             static_tools = self.static_tools or {}
