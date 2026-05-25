@@ -116,7 +116,7 @@ class SupervisedExecutor(LocalPythonExecutor):
             self.intercepted_artifacts = [] # Reset for new code action
             static_tools = self.static_tools or {}
             for name, tool in static_tools.items():
-                if hasattr(tool, "_is_atomonous_wrapped"):
+                if name == "final_answer" or hasattr(tool, "_is_atomonous_wrapped"):
                     continue
                 
                 def generate_wrapper(original_func):
