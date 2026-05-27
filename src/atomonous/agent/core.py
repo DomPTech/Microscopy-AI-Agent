@@ -34,6 +34,7 @@ from atomonous.agent.models import SafeLiteLLMModel
 from atomonous.config import settings
 from atomonous.data.factory import ConverterFactory
 from atomonous.tools.symbolic_regression_tool import SymbolicRegressionTool
+from atomonous.tools.experiment_tools import ExperimentSearchTool, ExperimentArtifactReadTool
 
 class Agent:
     def __init__(self, model: Model, session_name: str = "", data_factory: Optional[ConverterFactory] = None):
@@ -53,7 +54,9 @@ class Agent:
 
         # Initialize default tools
         default_tools = [
-            SymbolicRegressionTool()
+            SymbolicRegressionTool(),
+            ExperimentSearchTool(),
+            ExperimentArtifactReadTool()
         ]
 
         self.agent = CodeAgent(
